@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "descargasri"
+version = "0.1.0"
+description = "Descargas Documentos Digitales SRI: descarga masiva de comprobantes electrónicos del SRI en línea (Ecuador)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.gui-scripts]
+descargasri = "descargasri.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["descargasri*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

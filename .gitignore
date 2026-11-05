@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+# Comprobantes reales: nunca versionar
+*.xml
+!tests/**/*.xml
+*.pdf
+*.xlsx
+registro.json
