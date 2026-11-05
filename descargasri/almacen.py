@@ -67,12 +67,14 @@ class RegistroMes:
         self.ruta = self.carpeta / "registro.json"
         self.datos: dict[str, Registro] = {}
         self.anulados: dict[str, dict] = {}
+        self.comprobacion: dict[str, dict] = {}
         if self.ruta.is_file():
             try:
                 crudo = json.loads(self.ruta.read_text(encoding="utf-8"))
                 for k, v in crudo.get("comprobantes", {}).items():
                     self.datos[k] = Registro(**{c: v[c] for c in Registro.__dataclass_fields__ if c in v})
                 self.anulados = crudo.get("anulados", {})
+                self.comprobacion = crudo.get("comprobacion", {})
             except (ValueError, TypeError, KeyError):
                 pass
 
@@ -95,6 +97,7 @@ class RegistroMes:
         crudo = {
             "comprobantes": {k: asdict(v) for k, v in sorted(self.datos.items())},
             "anulados": dict(sorted(self.anulados.items())),
+            "comprobacion": self.comprobacion,
         }
         tmp = self.ruta.with_suffix(".tmp")
         tmp.write_text(json.dumps(crudo, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -167,6 +170,21 @@ def escribir_indice(reg: RegistroMes, anio: int, mes: int) -> Path:
     hoja("Anulados", ["Lado", "Identificación", "Razón social", "Tipo", "Serie", "Clave de acceso"],
          [[v.get("lado", ""), v.get("identificacion", ""), v.get("razon", ""), v.get("tipo", ""),
            v.get("serie", ""), k] for k, v in reg.anulados.items()])
+
+    comp = wb.create_sheet("Comprobación")
+    comp.append(["Sección", "Tipo", "Según el SRI", "Leídos", "En la carpeta", "Pasos sin consultar", "Estado"])
+    for c in comp[1]:
+        c.font = negrita
+        c.fill = fondo
+    verde = PatternFill("solid", fgColor="D4EDDA")
+    for k, v in reg.comprobacion.items():
+        sec, tipo = k.split("|", 1)
+        comp.append([sec.capitalize(), tipo, v.get("sri", 0), v.get("leidos", 0), v.get("guardados", 0),
+                     ", ".join(v.get("fallidos", [])), "Completo" if v.get("completo") else "INCOMPLETO"])
+        for c in comp[comp.max_row]:
+            c.fill = verde if v.get("completo") else rojo
+    for col, ancho in zip("ABCDEFG", (12, 28, 14, 10, 14, 24, 12)):
+        comp.column_dimensions[col].width = ancho
 
     resumen = wb.create_sheet("Resumen", 0)
     resumen.append(["Periodo", f"{anio:04d}-{mes:02d}"])

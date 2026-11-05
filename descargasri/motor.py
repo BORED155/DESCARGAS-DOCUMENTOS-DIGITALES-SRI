@@ -109,7 +109,14 @@ class Motor(QObject):
             while True:
                 try:
                     orden = gen.throw(error) if error is not None else gen.send(valor)
-                except StopIteration:
+                except StopIteration as fin:
+                    res = fin.value
+                    if res is not None and hasattr(res, "completo"):
+                        if res.completo:
+                            msg = "Descarga COMPLETA: todo lo que reporta el SRI está en la carpeta."
+                        else:
+                            ok, msg = False, ("Descarga INCOMPLETA: revisa las líneas marcadas con ✘ y pulsa "
+                                              "Descargar otra vez (solo baja lo que falta).")
                     break
                 valor, error = None, None
                 try:

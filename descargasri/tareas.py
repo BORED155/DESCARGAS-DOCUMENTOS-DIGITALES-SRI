@@ -112,6 +112,7 @@ class Opciones:
     con_pdf: bool = False
     pausa_ms: tuple[int, int] = (400, 1000)
     hoy: date = field(default_factory=date.today)
+    cred: "Credenciales | None" = field(default=None, repr=False)
 
     @property
     def carpeta(self) -> Path:
@@ -120,6 +121,8 @@ class Opciones:
 
 @dataclass
 class Resumen:
+    conteos: dict = field(default_factory=dict)  # (mes, sección, tipo) -> Conteo
+    completo: bool = False
     nuevos: int = 0
     existentes: int = 0
     errores: int = 0
@@ -127,6 +130,12 @@ class Resumen:
     xml_servicio: int = 0
     pdf: int = 0
     anulados: int = 0
+
+    def conteo(self, mes: int, seccion: str, tipo: str):
+        k = (mes, seccion, tipo)
+        if k not in self.conteos:
+            self.conteos[k] = Conteo()
+        return self.conteos[k]
 
 
 # --- Utilidades ----------------------------------------------------------------
@@ -161,9 +170,10 @@ def comprobar_sesion(intentos: int = 15) -> Tarea:
     raise Falla("La sesión del SRI está cerrada. Vuelve a entrar con tu RUC y clave y pulsa Descargar otra vez.")
 
 
-def iniciar_sesion(cred: Credenciales) -> Tarea:
+def iniciar_sesion(cred: Credenciales, silencioso: bool = False) -> Tarea:
     """Entra al SRI con los datos del usuario (o reutiliza la sesión si ya es de ese RUC)."""
-    yield Aviso("Conectando con el SRI…")
+    if not silencioso:
+        yield Aviso("Conectando con el SRI…")
     yield Navegar(portal.URL_RECIBIDOS)
     estado = None
     for _ in range(40):
@@ -177,7 +187,8 @@ def iniciar_sesion(cred: Credenciales) -> Tarea:
     if not estado.get("login"):
         emp = yield from comprobar_sesion()
         if cred.corresponde(emp["ruc"]):
-            yield Aviso(f"Sesión ya abierta: {emp['ruc']} {emp.get('razon', '')}", "ok")
+            if not silencioso:
+                yield Aviso(f"Sesión ya abierta: {emp['ruc']} {emp.get('razon', '')}", "ok")
             return emp
         yield Aviso(f"Había una sesión de {emp['ruc']} {emp.get('razon', '')}; se cierra para entrar con {cred.usuario}.")
         yield BorrarSesion()
@@ -185,7 +196,7 @@ def iniciar_sesion(cred: Credenciales) -> Tarea:
         yield from esperar_condicion(portal.hay("document.getElementById('kc-form-login')"), bool, 45,
                                      "abrir la página de ingreso")
     if not cred.clave:
-        raise Falla("Escribe la clave del SRI para entrar.")
+        raise FallaFatal("El SRI pide entrar de nuevo: escribe la clave y pulsa Descargar.")
     r = yield Js(portal.ingresar(cred.usuario.strip(), cred.ci_adicional.strip(), cred.clave))
     if not r or not r.get("ok"):
         raise Falla((r or {}).get("e", "No se pudo llenar el ingreso del SRI."))
@@ -195,14 +206,15 @@ def iniciar_sesion(cred: Credenciales) -> Tarea:
         if not e.get("login"):
             break
         if e.get("error"):
-            raise Falla(f"El SRI no aceptó el ingreso: {e['error']}")
+            raise FallaFatal(f"El SRI no aceptó el ingreso: {e['error']}")
         yield Esperar(750)
     else:
         raise Falla("El SRI no terminó el ingreso a tiempo.")
     emp = yield from comprobar_sesion(30)
     if not cred.corresponde(emp["ruc"]):
         yield Aviso(f"Entraste como {emp['ruc']} {emp.get('razon', '')}.", "alerta")
-    yield Aviso(f"Ingreso correcto: {emp['ruc']} {emp.get('razon', '')}", "ok")
+    yield Aviso(("Se volvió a entrar al SRI: " if silencioso else "Ingreso correcto: ")
+                + f"{emp['ruc']} {emp.get('razon', '')}", "ok")
     return emp
 
 
@@ -349,37 +361,109 @@ class Cancelado(Exception):
     """El usuario pulsó Detener."""
 
 
+# --- Errores y reintentos -------------------------------------------------------
+
+class FallaFatal(Falla):
+    """Error que no se arregla reintentando (clave incorrecta, sesión sin clave, año no permitido)."""
+
+
+NO_HAY_DATOS = "no existen datos"
+
+
+def asegurar_sesion(op: Opciones) -> Tarea:
+    """Tras un problema: comprueba la sesión y, si el SRI la cerró, vuelve a entrar."""
+    if op.cred is not None and op.cred.clave:
+        emp = yield from iniciar_sesion(op.cred, silencioso=True)
+    else:
+        try:
+            emp = yield from comprobar_sesion(10)
+        except Falla:
+            raise FallaFatal("El SRI cerró la sesión. Escribe la clave y pulsa Descargar: "
+                             "solo se bajará lo que falta.")
+    if emp.get("ruc") != op.ruc:
+        raise FallaFatal(f"La sesión del SRI cambió a {emp.get('ruc')}; se detiene para no mezclar empresas.")
+
+
+def unidad(op: Opciones, desc: str, fabrica: Callable[[], Tarea], intentos: int = 3,
+           espera_ms: int = 15_000) -> Tarea:
+    """Ejecuta un paso (un tipo de un mes, un día de emitidos…) con reintentos.
+
+    Si se agotan los intentos, avisa y devuelve None para seguir con el resto."""
+    ultimo: Exception | None = None
+    for intento in range(1, intentos + 1):
+        try:
+            return (yield from fabrica())
+        except FallaFatal:
+            raise
+        except Falla as e:
+            ultimo = e
+            if intento < intentos:
+                yield Aviso(f"{desc}: {e} Reintento {intento}/{intentos - 1} en {espera_ms // 1000} s.", "alerta")
+                yield Esperar(espera_ms)
+                yield from asegurar_sesion(op)
+    yield Aviso(f"{desc}: no se pudo completar ({ultimo}). Vuelve a pulsar Descargar más tarde: "
+                "solo se bajará lo que falta.", "error")
+    return None
+
+
+@dataclass
+class Conteo:
+    sri: int = 0        # lo que el SRI dice que hay
+    leidos: int = 0     # filas que la app leyó
+    guardados: int = 0  # comprobantes con archivo en la carpeta
+    fallidos: list[str] = field(default_factory=list)  # pasos que no se pudieron completar
+
+    @property
+    def completo(self) -> bool:
+        return not self.fallidos and self.guardados >= self.sri and self.leidos >= self.sri
+
+
 # --- Recorrido por páginas ----------------------------------------------------
 
 def iterar_paginas(sufijo: str, procesar: Callable[[list[str], list[dict]], Tarea]) -> Tarea:
     """Pone muchas filas por página, recorre las páginas y procesa cada una.
 
     El portal solo entrega el archivo de las filas visibles, por eso cada
-    página se procesa antes de pedir la siguiente. Devuelve cuántas filas leyó."""
+    página se procesa antes de pedir la siguiente. Devuelve un Conteo."""
     t = (yield Js(portal.total(sufijo))) or {}
     if t.get("total", 0) > t.get("porPagina", 0):
         r = yield Js(portal.poner_filas_por_pagina(sufijo))
         if r and r.get("ok"):
             yield from esperar_consulta(sufijo, entera=False)
             t = (yield Js(portal.total(sufijo))) or t
-    total = t.get("total", 0)
-    paginas = max(1, math.ceil(total / max(1, t.get("porPagina") or 1)))
-    cuenta = 0
+    c = Conteo(sri=int(t.get("total", 0)))
+    paginas = max(1, math.ceil(c.sri / max(1, t.get("porPagina") or 1)))
     for p in range(paginas):
         if p > 0:
             yield Js(portal.ir_a_pagina(sufijo, p))
             yield from esperar_consulta(sufijo, entera=False)
         datos = (yield Js(portal.leer_tabla(sufijo))) or {"cols": [], "filas": []}
-        cuenta += len(datos["filas"])
-        yield from procesar(datos["cols"], datos["filas"])
-    return cuenta
+        c.leidos += len(datos["filas"])
+        c.guardados += yield from procesar(datos["cols"], datos["filas"])
+    if c.leidos < c.sri:
+        raise Falla(f"el SRI indicó {c.sri} pero la tabla mostró {c.leidos}.")
+    if c.guardados < c.leidos:
+        raise Falla(f"faltan {c.leidos - c.guardados} archivo(s) por bajar.")
+    return c
+
+
+def sin_resultados(e: dict) -> bool:
+    """La consulta terminó sin filas: solo es válido si el SRI dice que no hay datos."""
+    if e.get("filas", 0) > 0:
+        return False
+    msg = (e.get("mensajes") or "").strip()
+    if NO_HAY_DATOS in msg.lower() or not msg:
+        return True
+    raise Falla(f"el SRI respondió «{msg}».")
 
 
 # --- Recibidos ----------------------------------------------------------------
 
 def procesar_recibidos(op: Opciones, regs: Registros, res: Resumen, cols: list[str], filas: list[dict]) -> Tarea:
+    """Baja el XML de cada fila visible. Devuelve cuántas quedaron con archivo."""
     pos = columnas(cols)
     seguidos = 0
+    guardados = 0
     for f in filas:
         clave, reg = fila_a_registro("recibidos", pos, f.get("celdas", []))
         if not clave:
@@ -405,6 +489,8 @@ def procesar_recibidos(op: Opciones, regs: Registros, res: Resumen, cols: list[s
                 res.errores += 1
                 seguidos += 1
             yield from pausa(op)
+        if ruta_xml.is_file():
+            guardados += 1
         if op.con_pdf and f.get("pdf"):
             ruta_pdf = ruta_xml.with_suffix(".pdf")
             if not ruta_pdf.is_file():
@@ -417,8 +503,9 @@ def procesar_recibidos(op: Opciones, regs: Registros, res: Resumen, cols: list[s
                 reg.archivos.append(_rel(op, ruta_pdf))
         regs.de(clave.fecha.year, clave.fecha.month).poner(reg)
         if seguidos >= 3:
-            raise Falla("El portal dejó de entregar los XML (¿se cerró la sesión?). "
-                        "Vuelve a entrar y pulsa Descargar: lo ya bajado no se repite.")
+            regs.guardar()
+            raise Falla("el portal dejó de entregar los XML (¿se cerró la sesión?).")
+    return guardados
 
 
 def _captcha_rechazado(e: dict) -> bool:
@@ -433,7 +520,8 @@ def consultar_recibidos_verificado(op: Opciones, mes: int, tipo: str, reintentos
     for intento in range(reintentos + 1):
         r = yield Js(portal.consultar_recibidos(op.anio, mes, tipo))
         if not r or not r.get("ok"):
-            raise Falla((r or {}).get("e", "No se pudo consultar recibidos"))
+            e = (r or {}).get("e", "No se pudo consultar recibidos")
+            raise (FallaFatal if "no permite" in e else Falla)(e)
         e = yield from esperar_consulta(sufijo, entera=True)
         if not _captcha_rechazado(e):
             return e
@@ -453,22 +541,38 @@ def consultar_recibidos_verificado(op: Opciones, mes: int, tipo: str, reintentos
         yield Js(portal.js("D.marcar(); return true;"))
 
 
-def tarea_recibidos(op: Opciones, regs: Registros, res: Resumen, mes: int, avance: Callable[[str], Tarea]) -> Tarea:
+def abrir_recibidos() -> Tarea:
+    hay = yield Js(portal.hay("document.getElementById('frmPrincipal:btnBuscar')"))
+    if not hay:
+        yield Navegar(portal.URL_RECIBIDOS)
+        yield from esperar_condicion(portal.hay("document.getElementById('frmPrincipal:btnBuscar')"), bool, 60,
+                                     "abrir comprobantes recibidos")
+
+
+def recibidos_tipo(op: Opciones, regs: Registros, res: Resumen, mes: int, tipo: str) -> Tarea:
     sufijo = "tablaCompRecibidos"
+    yield from abrir_recibidos()
+    e = yield from consultar_recibidos_verificado(op, mes, tipo)
+    if sin_resultados(e):
+        return Conteo()
+    c = yield from iterar_paginas(sufijo, lambda cols, filas: procesar_recibidos(op, regs, res, cols, filas))
+    regs.guardar()
+    return c
+
+
+def tarea_recibidos(op: Opciones, regs: Registros, res: Resumen, mes: int, avance: Callable[[str], Tarea]) -> Tarea:
     yield Navegar(portal.URL_RECIBIDOS)
-    yield from esperar_condicion(portal.hay("document.getElementById('frmPrincipal:btnBuscar')"), bool, 60,
-                                 "abrir comprobantes recibidos")
     for tipo in op.tipos_recibidos:
         nombre = portal.TIPOS_PORTAL[tipo]
-        yield from avance(f"Recibidos {mes:02d}/{op.anio}: {nombre}")
-        e = yield from consultar_recibidos_verificado(op, mes, tipo)
-        if e.get("filas", 0) <= 0:
-            yield Aviso(f"Recibidos {mes:02d}/{op.anio} · {nombre}: ninguno")
+        desc = f"Recibidos {mes:02d}/{op.anio} · {nombre}"
+        yield from avance(desc)
+        c = yield from unidad(op, desc, lambda: recibidos_tipo(op, regs, res, mes, tipo))
+        total = res.conteo(mes, "recibidos", nombre)
+        if c is None:
+            total.fallidos.append("consulta del mes")
             continue
-        cuenta = yield from iterar_paginas(
-            sufijo, lambda cols, filas: procesar_recibidos(op, regs, res, cols, filas))
-        yield Aviso(f"Recibidos {mes:02d}/{op.anio} · {nombre}: {cuenta}", "ok")
-        regs.guardar()
+        total.sri, total.leidos, total.guardados = c.sri, c.leidos, c.guardados
+        yield Aviso(f"{desc}: {c.sri}" if c.sri else f"{desc}: ninguno", "ok" if c.sri else "info")
         yield from pausa(op)
 
 
@@ -478,12 +582,44 @@ def tarea_recibidos(op: Opciones, regs: Registros, res: Resumen, mes: int, avanc
 class EstadoServicio:
     """Hasta qué fecha el servicio web ya no entrega XML (se aprende al vuelo)."""
     sin_xml_hasta: date | None = None
-    caido: bool = False
+    fallos_seguidos: int = 0
+
+    @property
+    def caido(self) -> bool:
+        return self.fallos_seguidos >= 3
+
+
+def pedir_xml_servicio(srv: EstadoServicio, clave: Clave) -> Tarea:
+    """XML autorizado desde el servicio web (con un reintento si no responde)."""
+    for intento in (1, 2):
+        try:
+            resp = yield Python(soap.consultar, (clave.texto,))
+        except Cancelado:
+            raise
+        except Exception as ex:  # red caída o servicio lento
+            if intento == 1:
+                yield Esperar(3000)
+                continue
+            srv.fallos_seguidos += 1
+            if srv.caido:
+                yield Aviso(f"El servicio web del SRI no responde ({ex}); el resto se baja en PDF.", "alerta")
+            return None
+        srv.fallos_seguidos = 0
+        if resp.autorizado:
+            return resp.xml
+        if soap.fuera_de_rango(resp) and (not srv.sin_xml_hasta or clave.fecha > srv.sin_xml_hasta):
+            srv.sin_xml_hasta = clave.fecha
+            yield Aviso(f"El SRI ya no entrega el XML de comprobantes del {clave.fecha:%d/%m/%Y} "
+                        "o anteriores; para esos se baja el PDF (RIDE).", "alerta")
+        return None
+    return None
 
 
 def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoServicio,
                       cols: list[str], filas: list[dict]) -> Tarea:
+    """XML (servicio web) o PDF de cada fila visible. Devuelve cuántas quedaron con archivo."""
     pos = columnas(cols)
+    guardados = 0
     for f in filas:
         clave, reg = fila_a_registro("emitidos", pos, f.get("celdas", []))
         if not clave:
@@ -497,24 +633,7 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
             reg.origen, reg.estado = "XML servicio web SRI", "Ya existía"
             completar_con_xml(reg, ruta_xml.read_bytes())
         else:
-            xml = None
-            if intentar_xml:
-                try:
-                    resp = yield Python(soap.consultar, (clave.texto,))
-                except Cancelado:
-                    raise
-                except Exception as ex:  # red caída o servicio con problemas
-                    srv.caido = True
-                    yield Aviso(f"El servicio web del SRI no respondió ({ex}); se bajará el PDF.", "alerta")
-                    resp = None
-                if resp is not None:
-                    if resp.autorizado:
-                        xml = resp.xml
-                    elif soap.fuera_de_rango(resp):
-                        if not srv.sin_xml_hasta or clave.fecha > srv.sin_xml_hasta:
-                            srv.sin_xml_hasta = clave.fecha
-                            yield Aviso(f"El SRI ya no entrega el XML de comprobantes del {clave.fecha:%d/%m/%Y} "
-                                        "o anteriores; para esos se baja el PDF (RIDE).", "alerta")
+            xml = (yield from pedir_xml_servicio(srv, clave)) if intentar_xml else None
             if xml:
                 almacen.guardar_archivo(ruta_xml, xml)
                 reg.archivos.append(_rel(op, ruta_xml))
@@ -544,7 +663,10 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
             yield from pausa(op)
         if ruta_pdf.is_file():
             reg.archivos.append(_rel(op, ruta_pdf))
+        if ruta_xml.is_file() or ruta_pdf.is_file():
+            guardados += 1
         regs.de(clave.fecha.year, clave.fecha.month).poner(reg)
+    return guardados
 
 
 def abrir_emitidos() -> Tarea:
@@ -564,29 +686,40 @@ def dias_del_mes(anio: int, mes: int, hoy: date) -> list[date]:
     return [date(anio, mes, d) for d in range(1, ultimo + 1) if date(anio, mes, d) <= hoy]
 
 
+def emitidos_dia(op: Opciones, regs: Registros, res: Resumen, srv: EstadoServicio, d: date, tipo: str) -> Tarea:
+    sufijo = "tablaCompEmitidos"
+    hay = yield Js(portal.hay("document.getElementById('frmPrincipal:calendarFechaDesde_input')"))
+    if not hay:
+        yield from abrir_emitidos()
+    r = yield Js(portal.consultar_emitidos(d.strftime("%d/%m/%Y"), tipo))
+    if not r or not r.get("ok"):
+        raise Falla((r or {}).get("e", "no se pudo consultar emitidos."))
+    e = yield from esperar_consulta(sufijo, entera=True)
+    if sin_resultados(e):
+        return Conteo()
+    return (yield from iterar_paginas(
+        sufijo, lambda cols, filas: procesar_emitidos(op, regs, res, srv, cols, filas)))
+
+
 def tarea_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoServicio, mes: int,
                    avance: Callable[[str], Tarea]) -> Tarea:
-    sufijo = "tablaCompEmitidos"
     yield from abrir_emitidos()
     dias = dias_del_mes(op.anio, mes, op.hoy)
     for tipo in op.tipos_emitidos:
         nombre = portal.TIPOS_PORTAL[tipo]
-        cuenta = 0
+        total = res.conteo(mes, "emitidos", nombre)
         for d in dias:
-            yield from avance(f"Emitidos {d:%d/%m/%Y}: {nombre}")
-            r = yield Js(portal.consultar_emitidos(d.strftime("%d/%m/%Y"), tipo))
-            if not r or not r.get("ok"):
-                # la página pudo haberse recargado: reabrir una vez
-                yield from abrir_emitidos()
-                r = yield Js(portal.consultar_emitidos(d.strftime("%d/%m/%Y"), tipo))
-                if not r or not r.get("ok"):
-                    raise Falla((r or {}).get("e", "No se pudo consultar emitidos"))
-            e = yield from esperar_consulta(sufijo, entera=True)
-            if e.get("filas", 0) > 0:
-                cuenta += yield from iterar_paginas(
-                    sufijo, lambda cols, filas: procesar_emitidos(op, regs, res, srv, cols, filas))
+            desc = f"Emitidos {d:%d/%m/%Y} · {nombre}"
+            yield from avance(desc)
+            c = yield from unidad(op, desc, lambda: emitidos_dia(op, regs, res, srv, d, tipo))
+            if c is None:
+                total.fallidos.append(f"{d:%d/%m}")
+            else:
+                total.sri += c.sri
+                total.leidos += c.leidos
+                total.guardados += c.guardados
             yield from pausa(op)
-        yield Aviso(f"Emitidos {mes:02d}/{op.anio} · {nombre}: {cuenta}", "ok" if cuenta else "info")
+        yield Aviso(f"Emitidos {mes:02d}/{op.anio} · {nombre}: {total.sri}", "ok" if total.sri else "info")
         regs.guardar()
 
 
@@ -600,8 +733,7 @@ def _columna(cols: list[str], *palabras: str) -> int | None:
     return None
 
 
-def tarea_anulados(op: Opciones, regs: Registros, res: Resumen, mes: int, avance: Callable[[str], Tarea]) -> Tarea:
-    yield from avance(f"Anulados {mes:02d}/{op.anio}")
+def anulados_mes(op: Opciones, regs: Registros, mes: int) -> Tarea:
     yield Navegar(portal.URL_ANULACION)
     enlace = "Consulta comprobantes anulados"
     yield from esperar_condicion(
@@ -613,13 +745,14 @@ def tarea_anulados(op: Opciones, regs: Registros, res: Resumen, mes: int, avance
         bool, 60, "abrir consulta de anulados")
     r = yield Js(portal.consultar_anulados(op.anio, mes))
     if not r or not r.get("ok"):
-        yield Aviso(f"Anulados {mes:02d}/{op.anio}: {(r or {}).get('e', 'no se pudo consultar')}", "alerta")
-        return
+        raise Falla((r or {}).get("e", "no se pudo consultar anulados."))
     for _ in range(120):
         e = (yield Js(portal.estado_anulados())) or {}
         if e.get("libre") and (e.get("nuevas", 0) > 0 or e.get("mensajes")):
             break
         yield Esperar(500)
+    else:
+        raise Falla("el portal no devolvió la lista de anulados.")
     yield Esperar(500)
     k = yield Js(portal.anulados_filas_por_pagina())
     if k:
@@ -632,6 +765,10 @@ def tarea_anulados(op: Opciones, regs: Registros, res: Resumen, mes: int, avance
     tablas = (yield Js(portal.leer_anulados())) or []
     n = 0
     for t in tablas:
+        pag = t.get("pag") or {}
+        if pag.get("total", 0) > len(t.get("filas", [])):
+            raise Falla(f"anulados {t.get('lado')}: el portal tiene {pag['total']} y se leyeron "
+                        f"{len(t.get('filas', []))}.")
         cols = t.get("cols", [])
         i_id = _columna(cols, "identificación", "identificacion", "ruc")
         i_raz = _columna(cols, "razón", "razon")
@@ -650,12 +787,20 @@ def tarea_anulados(op: Opciones, regs: Registros, res: Resumen, mes: int, avance
                 "tipo": c(i_tipo) or clave.nombre_tipo, "serie": c(i_serie) or clave.serie,
             })
             n += 1
-        pag = t.get("pag") or {}
-        if pag.get("total", 0) > len(t.get("filas", [])):
-            yield Aviso(f"Anulados {t.get('lado')}: el portal tiene {pag['total']} y solo se leyeron "
-                        f"{len(t.get('filas', []))}.", "alerta")
+    return n
+
+
+def tarea_anulados(op: Opciones, regs: Registros, res: Resumen, mes: int, avance: Callable[[str], Tarea]) -> Tarea:
+    desc = f"Anulados {mes:02d}/{op.anio}"
+    yield from avance(desc)
+    n = yield from unidad(op, desc, lambda: anulados_mes(op, regs, mes))
+    total = res.conteo(mes, "anulados", "Lista")
+    if n is None:
+        total.fallidos.append("consulta del mes")
+        return
+    total.sri = total.leidos = total.guardados = n
     res.anulados += n
-    yield Aviso(f"Anulados {mes:02d}/{op.anio}: {n}", "ok" if n else "info")
+    yield Aviso(f"{desc}: {n}", "ok" if n else "info")
 
 
 # --- Tarea completa -------------------------------------------------------------
@@ -676,42 +821,75 @@ def total_pasos(op: Opciones) -> int:
     return max(n, 1)
 
 
+def comprobacion(res: Resumen, regs: Registros, op: Opciones) -> Tarea:
+    """Compara lo que dice el SRI con lo que quedó en la carpeta y lo deja en el registro."""
+    todo_bien = True
+    for (mes, seccion, tipo), c in sorted(res.conteos.items()):
+        rmes = regs.de(op.anio, mes)
+        rmes.comprobacion[f"{seccion}|{tipo}"] = {
+            "sri": c.sri, "leidos": c.leidos, "guardados": c.guardados, "fallidos": c.fallidos,
+            "completo": c.completo,
+        }
+        if seccion == "anulados" and not c.fallidos:
+            continue
+        if c.completo and c.sri == 0:
+            continue
+        nombre = f"{seccion.capitalize()} · {tipo}"
+        if c.completo:
+            yield Aviso(f"✔ {nombre}: SRI {c.sri} · en carpeta {c.guardados}", "ok")
+        else:
+            todo_bien = False
+            extra = f" · sin consultar: {', '.join(c.fallidos)}" if c.fallidos else ""
+            yield Aviso(f"✘ {nombre}: SRI {c.sri} · en carpeta {c.guardados}{extra}", "error")
+    return todo_bien
+
+
 def descargar(op: Opciones, cred: Credenciales | None = None) -> Tarea:
     res = Resumen()
     regs = Registros(op)
     srv = EstadoServicio()
     total = total_pasos(op)
     hecho = [0]
+    op.cred = cred
 
     def avance(texto: str) -> Tarea:
         yield Progreso(hecho[0], total, texto)
         hecho[0] += 1
 
-    if cred is not None:
-        emp = yield from iniciar_sesion(cred)
-        op.ruc, op.razon = emp["ruc"], emp.get("razon", "")
-        cred.clave = ""  # ya no hace falta
-    else:
-        emp = yield from comprobar_sesion()
-        if emp.get("ruc") != op.ruc:
-            raise Falla(f"La sesión abierta es de {emp.get('ruc')} {emp.get('razon', '')}, no de {op.ruc}.")
-    meses = meses_validos(op)
-    if not meses:
-        raise Falla("Los meses elegidos todavía no han empezado.")
-    yield Aviso(f"Empresa {op.ruc} {op.razon} · {op.anio}, meses {', '.join(f'{m:02d}' for m in meses)}")
     try:
-        for mes in meses:
-            if op.recibidos and op.tipos_recibidos:
-                yield from tarea_recibidos(op, regs, res, mes, avance)
-            if op.emitidos and op.tipos_emitidos:
-                yield from tarea_emitidos(op, regs, res, srv, mes, avance)
-            if op.anulados:
-                yield from tarea_anulados(op, regs, res, mes, avance)
+        if cred is not None:
+            emp = yield from iniciar_sesion(cred)
+            op.ruc, op.razon = emp["ruc"], emp.get("razon", "")
+        else:
+            emp = yield from comprobar_sesion()
+            if emp.get("ruc") != op.ruc:
+                raise Falla(f"La sesión abierta es de {emp.get('ruc')} {emp.get('razon', '')}, no de {op.ruc}.")
+        meses = meses_validos(op)
+        if not meses:
+            raise Falla("El mes elegido todavía no ha empezado.")
+        yield Aviso(f"Empresa {op.ruc} {op.razon} · {', '.join(f'{m:02d}' for m in meses)}/{op.anio}")
+        try:
+            for mes in meses:
+                if op.recibidos and op.tipos_recibidos:
+                    yield from tarea_recibidos(op, regs, res, mes, avance)
+                if op.emitidos and op.tipos_emitidos:
+                    yield from tarea_emitidos(op, regs, res, srv, mes, avance)
+                if op.anulados:
+                    yield from tarea_anulados(op, regs, res, mes, avance)
+            yield Progreso(total, total, "Comprobando")
+            yield Aviso("Comprobación (lo que dice el SRI frente a lo que está en la carpeta):")
+            res.completo = yield from comprobacion(res, regs, op)
+        finally:
+            regs.guardar()
     finally:
-        regs.guardar()
-    yield Progreso(total, total, "Terminado")
+        if cred is not None:
+            cred.clave = ""  # la clave solo vive en memoria mientras dura la descarga
+        op.cred = None
     yield Aviso(
-        f"Listo: {res.nuevos} nuevo(s) ({res.xml_portal} XML del portal, {res.xml_servicio} XML del servicio web, "
-        f"{res.pdf} PDF), {res.existentes} ya existían, {res.anulados} anulado(s), {res.errores} error(es).",
-        "ok" if not res.errores else "alerta")
+        f"{res.nuevos} nuevo(s) ({res.xml_portal} XML del portal, {res.xml_servicio} XML del servicio web, "
+        f"{res.pdf} PDF), {res.existentes} ya existían, {res.anulados} anulado(s).", "info")
+    if res.completo:
+        yield Aviso("COMPLETO: todo lo que el SRI reporta para el periodo está en la carpeta.", "ok")
+    else:
+        yield Aviso("INCOMPLETO: faltan comprobantes. Pulsa Descargar otra vez (solo baja lo que falta).", "error")
     return res

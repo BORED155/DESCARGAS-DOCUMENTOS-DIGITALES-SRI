@@ -85,7 +85,7 @@ def test_registro_fusiona_y_marca_anulados(tmp_path: Path):
     ruta = almacen.escribir_indice(otra, 2026, 3)
     from openpyxl import load_workbook
     wb = load_workbook(ruta)
-    assert wb.sheetnames == ["Resumen", "Recibidos", "Emitidos", "Anulados"]
+    assert wb.sheetnames == ["Resumen", "Recibidos", "Emitidos", "Anulados", "Comprobación"]
     assert wb["Recibidos"]["M2"].value == "Sí"
 
 
@@ -296,7 +296,10 @@ def test_descarga_completa_simulada(escenario):
     assert datos["comprobantes"][rec[0][0]]["anulado"] is True
     assert datos["comprobantes"][emi_reciente]["razon_contraparte"] == "CLIENTE FICTICIO"
     assert (mes / "indice 2026-03.xlsx").is_file()
-    assert any("Listo" in a for a in avisos)
+    assert res.completo
+    assert any(a.startswith("COMPLETO") for a in avisos)
+    assert any("✔ Recibidos · Factura: SRI 53 · en carpeta 53" in a for a in avisos)
+    assert datos["comprobacion"]["recibidos|Factura"]["completo"] is True
 
     # segunda vez: nada se vuelve a bajar
     res2 = ejecutar(tareas.descargar(op), PortalFalso(falso.recibidos, falso.emitidos, falso.anulados), [])
@@ -429,3 +432,98 @@ def test_login_con_cedula_y_clave_incorrecta():
 
 def test_credenciales_no_muestran_la_clave():
     assert "secreta" not in repr(tareas.Credenciales(RUC_EMPRESA, "secreta"))
+
+
+class PortalQueFalla(PortalFalso):
+    """Portal que corta la sesión tras unas descargas o miente en el total."""
+
+    def __init__(self, *a, cortar_tras=None, total_falso=None, **k):
+        super().__init__(*a, **k)
+        self.cortar_tras = cortar_tras
+        self.total_falso = total_falso
+        self.descargas = 0
+        self.sesion = True
+        self.reingresos = 0
+
+    def js(self, codigo):
+        t = codigo[len(portal.LIB):] if codigo.startswith(portal.LIB) else codigo
+        if "kc-form-login'), url" in t and "error:" not in t:
+            return {"login": not self.sesion, "url": "x"}
+        if "error: [...new Set" in t:
+            return {"login": not self.sesion, "url": "x", "error": ""}
+        if "poner('usuario'" in t:
+            self.sesion = True
+            self.reingresos += 1
+            return {"ok": True}
+        if not self.sesion and "D.empresa()" in t:
+            return {"url": "x", "emp": None, "login": True}
+        if not self.sesion and "btnBuscar')" in t:
+            return False
+        if self.total_falso and "D.total(" in t:
+            v = super().js(codigo)
+            v["total"] = self.total_falso
+            return v
+        return super().js(codigo)
+
+    def bajar(self, codigo):
+        self.descargas += 1
+        if self.cortar_tras and self.descargas == self.cortar_tras and self.sesion:
+            self.sesion = False
+        if not self.sesion:
+            return {"ok": True, "v": {"status": 200, "tipo": "text/html",
+                                      "b64": base64.b64encode(b"<html>login</html>").decode()}}
+        return super().bajar(codigo)
+
+    def navegar(self, url):
+        if not self.sesion:
+            self.pagina = "login"
+            return
+        super().navegar(url)
+
+
+def _solo_recibidos(op):
+    op.emitidos = op.anulados = False
+    return op
+
+
+def test_sesion_cortada_vuelve_a_entrar_y_completa(escenario):
+    falso, op, *_ = escenario
+    p = PortalQueFalla(falso.recibidos, falso.emitidos, falso.anulados, cortar_tras=10)
+    avisos: list = []
+    cred = tareas.Credenciales(RUC_EMPRESA, "clave-de-prueba")
+    gen = tareas.descargar(_solo_recibidos(op), cred)
+    res = _correr(gen, p, avisos)
+    assert p.reingresos == 1
+    assert res.completo and res.xml_portal == 53
+    assert any("Se volvió a entrar" in a for a in avisos)
+    assert cred.clave == ""  # se borra al terminar
+
+
+def test_total_inconsistente_queda_incompleto(escenario):
+    falso, op, *_ = escenario
+    p = PortalQueFalla(falso.recibidos, falso.emitidos, falso.anulados, total_falso=60)
+    avisos: list = []
+    res = _correr(tareas.descargar(_solo_recibidos(op)), p, avisos)
+    assert not res.completo
+    assert any(a.startswith("INCOMPLETO") for a in avisos)
+    assert any("✘ Recibidos · Factura" in a for a in avisos)
+
+
+def _correr(gen, falso, avisos):
+    valor = None
+    while True:
+        try:
+            orden = gen.send(valor)
+        except StopIteration as fin:
+            return fin.value
+        valor = None
+        if isinstance(orden, tareas.Js):
+            valor = json.loads(json.dumps(falso.js(orden.codigo)))
+        elif isinstance(orden, tareas.JsAsync):
+            valor = falso.bajar(orden.codigo)
+        elif isinstance(orden, tareas.Navegar):
+            falso.navegar(orden.url)
+        elif isinstance(orden, tareas.Python):
+            valor = orden.funcion(*orden.args)
+        elif isinstance(orden, tareas.Aviso):
+            avisos.append(orden.texto)
