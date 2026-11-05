@@ -95,12 +95,15 @@ def _json_http(url: str, timeout: float = 2.0, metodo: str = "GET"):
 
 
 def _puerto_libre(p: int) -> bool:
-    with socket.socket() as s:
-        try:
-            s.bind(("127.0.0.1", p))
-            return True
-        except OSError:
+    """Nadie escucha en el puerto.
+
+    Se prueba conectándose (no con bind): tras cerrar el navegador quedan
+    conexiones en TIME_WAIT que hacen fallar un bind aunque el puerto esté libre."""
+    try:
+        with socket.create_connection(("127.0.0.1", p), timeout=0.5):
             return False
+    except OSError:
+        return True
 
 
 def preparar_perfil(perfil: Path) -> None:
@@ -165,7 +168,11 @@ class Navegador:
             raise NavegadorError("No encontré Brave, Google Chrome ni Microsoft Edge instalados. "
                                  "Instala Brave (brave.com) o Google Chrome y vuelve a intentar.")
         if not _puerto_libre(self.puerto):
-            raise NavegadorError(f"El puerto {self.puerto} está ocupado por otro programa.")
+            # lo usa otro programa: buscar otro puerto libre cercano
+            libre = next((p for p in range(self.puerto + 1, self.puerto + 40) if _puerto_libre(p)), None)
+            if libre is None:
+                raise NavegadorError(f"Los puertos {self.puerto}–{self.puerto + 39} están ocupados por otros programas.")
+            self.puerto = libre
         self.perfil.mkdir(parents=True, exist_ok=True)
         preparar_perfil(self.perfil)
         args = [exe, f"--remote-debugging-port={self.puerto}", "--remote-debugging-address=127.0.0.1",

@@ -736,3 +736,16 @@ def test_solo_pdf_despues_de_xml_copia_y_baja_los_pdf(escenario):
     assert res.completo and len(list(compras.glob("*.pdf"))) == 53
     assert res.pdf == 1   # solo se bajó el que faltaba; los otros 52 se copiaron
     assert len(list((op.carpeta / "2026-03" / "recibidos" / "facturas").glob("*.xml"))) == 53
+
+
+def test_puerto_ocupado_y_libre():
+    import socket
+    from descargasri.navegador import _puerto_libre
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    s.listen()
+    p = s.getsockname()[1]
+    assert not _puerto_libre(p)
+    s.close()
+    assert _puerto_libre(p)
