@@ -426,6 +426,36 @@ def existente(op: Opciones, regs: "Registros", seccion: str, clave: Clave, ext: 
     return None
 
 
+def existente_pdf(op: Opciones, regs: "Registros", seccion: str, clave: Clave, contraparte: str = "") -> Path | None:
+    """PDF ya guardado. Con «Solo PDF» debe estar en la carpeta PDF: si está en otra, se copia."""
+    encontrado = existente(op, regs, seccion, clave, ".pdf", contraparte)
+    if not op.solo_pdf:
+        return encontrado
+    # buscar también uno ya puesto en la carpeta PDF (de una ejecución anterior)
+    rmes = regs.de(clave.fecha.year, clave.fecha.month)
+    previo = rmes.datos.get(clave.texto)
+    for a in (previo.archivos if previo else []):
+        r = op.carpeta / a
+        if r.suffix.lower() == ".pdf" and "PDF" in r.parts and r.is_file() and \
+                verificacion.archivo_valido(r, clave.texto):
+            return r
+    if encontrado is None:
+        return None
+    if "PDF" in encontrado.parts:
+        return encontrado
+    quien = contraparte or contraparte_de_archivo(seccion, encontrado)
+    destino = almacen.ruta_pdf_agrupada(op.carpeta, seccion, clave, quien)
+    if not destino.is_file():
+        almacen.guardar_archivo(destino, encontrado.read_bytes())
+    return destino
+
+
+def ruta_pdf_nueva(op: Opciones, seccion: str, clave: Clave, contraparte: str) -> Path:
+    if op.solo_pdf:
+        return almacen.ruta_pdf_agrupada(op.carpeta, seccion, clave, contraparte)
+    return almacen.ruta_legible(op.carpeta, seccion, clave, contraparte, ".pdf")
+
+
 def _existente(op: Opciones, regs: "Registros", seccion: str, clave: Clave, ext: str,
                contraparte: str = "") -> Path | None:
     rmes = regs.de(clave.fecha.year, clave.fecha.month)
@@ -600,7 +630,7 @@ def procesar_recibidos(op: Opciones, regs: Registros, res: Resumen, cols: list[s
                     seguidos += 1
                 yield from pausa(op)
         if quiere_pdf:
-            ruta_pdf = existente(op, regs, "recibidos", clave, ".pdf", reg.razon_contraparte)
+            ruta_pdf = existente_pdf(op, regs, "recibidos", clave, reg.razon_contraparte)
             if ruta_pdf:
                 if not quiere_xml:
                     res.existentes += 1
@@ -608,7 +638,7 @@ def procesar_recibidos(op: Opciones, regs: Registros, res: Resumen, cols: list[s
             elif f.get("pdf"):
                 status, tipo, cont = yield from bajar_link(f["pdf"], "p" + clave.texto[-12:])
                 if cont.startswith(b"%PDF"):
-                    ruta_pdf = almacen.ruta_legible(op.carpeta, "recibidos", clave, reg.razon_contraparte, ".pdf")
+                    ruta_pdf = ruta_pdf_nueva(op, "recibidos", clave, reg.razon_contraparte)
                     almacen.guardar_archivo(ruta_pdf, cont)
                     res.pdf += 1
                     if not quiere_xml:
@@ -771,7 +801,7 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
         if not clave:
             continue
         ruta_xml = existente(op, regs, "emitidos", clave, ".xml")
-        ruta_pdf = existente(op, regs, "emitidos", clave, ".pdf")
+        ruta_pdf = existente_pdf(op, regs, "emitidos", clave)
         intentar_xml = not op.solo_pdf and not srv.caido and \
             not (srv.sin_xml_hasta and clave.fecha <= srv.sin_xml_hasta)
         if op.solo_pdf:
@@ -796,7 +826,7 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
                 status, tipo, cont = yield from bajar_link(f["pdf"], "p" + clave.texto[-12:])
                 if cont.startswith(b"%PDF"):
                     completar_con_pdf(reg, cont)
-                    ruta_pdf = almacen.ruta_legible(op.carpeta, "emitidos", clave, reg.razon_contraparte, ".pdf")
+                    ruta_pdf = ruta_pdf_nueva(op, "emitidos", clave, reg.razon_contraparte)
                     almacen.guardar_archivo(ruta_pdf, cont)
                     reg.origen, reg.estado = "PDF RIDE", "Descargado (sin XML)"
                     res.nuevos += 1
@@ -809,7 +839,7 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
             _, _, cont = yield from bajar_link(f["pdf"], "p" + clave.texto[-12:])
             if cont.startswith(b"%PDF"):
                 completar_con_pdf(reg, cont)
-                ruta_pdf = almacen.ruta_legible(op.carpeta, "emitidos", clave, reg.razon_contraparte, ".pdf")
+                ruta_pdf = ruta_pdf_nueva(op, "emitidos", clave, reg.razon_contraparte)
                 almacen.guardar_archivo(ruta_pdf, cont)
                 res.pdf += 1
             yield from pausa(op)
@@ -1130,6 +1160,12 @@ def descargar(op: Opciones, cred: Credenciales | None = None) -> Tarea:
             if op.reparados:
                 yield Aviso(f"Se encontraron {len(op.reparados)} archivo(s) dañados o cambiados; se apartaron "
                             "con la extensión .dañado y se volvieron a bajar del SRI.", "alerta")
+            if op.solo_pdf:
+                for mes in meses:
+                    ruta, docs, pags, excl = almacen.consolidar_pdf(op.carpeta, regs.de(op.anio, mes), op.anio, mes)
+                    if ruta:
+                        yield Aviso(f"Consolidado para imprimir: {ruta.name} — {docs} documento(s), {pags} página(s)"
+                                    + (f"; se dejaron fuera {excl} anulado(s)." if excl else "."), "ok")
             yield Progreso(total, total, "Comprobando")
             yield Aviso("Comprobación (lo que dice el SRI frente a lo que está en la carpeta):")
             res.completo = yield from comprobacion(res, regs, op)

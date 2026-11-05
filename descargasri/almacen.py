@@ -62,6 +62,89 @@ def nombre_archivo(clave: Clave, contraparte: str, extension: str) -> str:
     return f"{clave.fecha:%Y-%m-%d} {quien} {tipo} {clave.serie}{extension}"
 
 
+# Carpeta «PDF» (opción «Solo PDF»): grupos contables, en el orden del consolidado.
+#   (sección, código de tipo en la clave) -> nombre de la carpeta
+GRUPOS_PDF: list[tuple[tuple[str, str], str]] = [
+    (("recibidos", "01"), "Compras"),
+    (("recibidos", "04"), "Notas de crédito compras"),
+    (("recibidos", "05"), "Notas de débito compras"),
+    (("emitidos", "07"), "Retenciones compras"),
+    (("emitidos", "03"), "Liquidaciones de compra"),
+    (("emitidos", "01"), "Ventas"),
+    (("emitidos", "04"), "Notas de crédito ventas"),
+    (("emitidos", "05"), "Notas de débito ventas"),
+    (("recibidos", "07"), "Retenciones ventas"),
+    (("recibidos", "03"), "Liquidaciones recibidas"),
+    (("emitidos", "06"), "Guías de remisión"),
+]
+_GRUPO = dict(GRUPOS_PDF)
+ORDEN_GRUPOS = [g for _, g in GRUPOS_PDF]
+
+
+def grupo_pdf(seccion: str, clave: Clave) -> str:
+    return _GRUPO.get((seccion, clave.tipo), f"Otros {seccion}")
+
+
+def carpeta_pdf(base_empresa: Path, clave: Clave) -> Path:
+    f = clave.fecha
+    return carpeta_mes(base_empresa, f.year, f.month) / "PDF"
+
+
+def ruta_pdf_agrupada(base_empresa: Path, seccion: str, clave: Clave, contraparte: str) -> Path:
+    return carpeta_pdf(base_empresa, clave) / grupo_pdf(seccion, clave) / nombre_archivo(clave, contraparte, ".pdf")
+
+
+def consolidar_pdf(base_empresa: Path, reg: "RegistroMes", anio: int, mes: int) -> tuple[Path | None, int, int, int]:
+    """Une los PDF de la carpeta «PDF» del mes en un solo archivo con marcadores.
+
+    Orden: grupo contable, fecha, serie. Los anulados no entran.
+    Devuelve (ruta, documentos, páginas, anulados excluidos)."""
+    from pypdf import PdfReader, PdfWriter
+
+    from .clave import leer_clave
+
+    carpeta = carpeta_mes(base_empresa, anio, mes) / "PDF"
+    filas = []
+    excluidos = 0
+    for r in reg.datos.values():
+        c = leer_clave(r.clave)
+        if not c:
+            continue
+        pdfs = [Path(base_empresa) / a for a in r.archivos
+                if a.lower().endswith(".pdf") and "/PDF/" in "/" + a.replace("\\", "/")]
+        pdfs = [p for p in pdfs if p.is_file()]
+        if not pdfs:
+            continue
+        if r.anulado:
+            excluidos += 1
+            continue
+        g = grupo_pdf(r.seccion, c)
+        orden = ORDEN_GRUPOS.index(g) if g in ORDEN_GRUPOS else len(ORDEN_GRUPOS)
+        filas.append((orden, g, c.fecha, c.serie, r, pdfs[0]))
+    if not filas:
+        return None, 0, 0, excluidos
+    filas.sort(key=lambda x: (x[0], x[2], x[3]))
+    w = PdfWriter()
+    padres: dict[str, object] = {}
+    for _o, g, fecha, serie, r, ruta in filas:
+        pagina = len(w.pages)
+        try:
+            w.append(PdfReader(str(ruta)))
+        except Exception:
+            continue
+        if g not in padres:
+            padres[g] = w.add_outline_item(g, pagina)
+        quien = r.razon_contraparte or ""
+        w.add_outline_item(f"{fecha:%d/%m/%Y} {quien} {serie}".strip(), pagina, parent=padres[g])
+    carpeta.mkdir(parents=True, exist_ok=True)
+    destino = carpeta / f"Consolidado {anio:04d}-{mes:02d}.pdf"
+    tmp = destino.with_name(destino.name + ".parcial")
+    with open(tmp, "wb") as f:
+        w.write(f)
+    tmp.replace(destino)
+    return destino, len(filas), len(w.pages), excluidos
+
+
 def ruta_legible(base_empresa: Path, seccion: str, clave: Clave, contraparte: str, extension: str) -> Path:
     return carpeta_comprobante(base_empresa, seccion, clave) / nombre_archivo(clave, contraparte, extension)
 

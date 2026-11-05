@@ -37,6 +37,15 @@ esté abierta.
     registro.json
     indice AAAA-MM.xlsx
 ```
+Con el formato **«Solo PDF»** los RIDE van a una carpeta aparte, por grupo contable, con un
+consolidado para imprimir (marcadores por grupo y documento; los anulados no entran):
+```
+<AAAA-MM>/PDF/
+    Consolidado AAAA-MM.pdf
+    Compras/  Notas de crédito compras/  Notas de débito compras/  Retenciones compras/
+    Liquidaciones de compra/  Ventas/  Notas de crédito ventas/  Notas de débito ventas/
+    Retenciones ventas/  Liquidaciones recibidas/  Guías de remisión/
+```
 Lo que ya existe no se vuelve a bajar.
 
 ## Desarrollo

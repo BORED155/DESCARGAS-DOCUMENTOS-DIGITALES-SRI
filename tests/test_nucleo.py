@@ -695,25 +695,38 @@ def test_modo_oculto_rechazado_reabre_visible_y_sigue(escenario):
 
 
 def test_solo_pdf(escenario):
+    from pypdf import PdfReader
     falso, op, rec, emi_reciente, emi_viejo, ret = escenario
     op.solo_pdf = True
-    op.anulados = False
     avisos: list = []
     res = _correr(tareas.descargar(op), falso, avisos)
-    mes = op.carpeta / "2026-03"
+    pdf = op.carpeta / "2026-03" / "PDF"
     assert res.completo
-    assert len(list((mes / "recibidos" / "facturas").glob("*.pdf"))) == 53
-    assert not list(mes.rglob("*.xml"))           # ningún XML
-    assert res.xml_servicio == 0 and res.xml_portal == 0
-    assert (mes / "emitidos" / "facturas" / "2026-03-02 CLIENTE 000000454 Factura 001-002-000000454.pdf").is_file()
+    assert len(list((pdf / "Compras").glob("*.pdf"))) == 53
+    assert (pdf / "Ventas" / "2026-03-02 CLIENTE 000000454 Factura 001-002-000000454.pdf").is_file()
+    assert (pdf / "Retenciones compras" / "2026-03-03 CLIENTE 000000012 Retención 001-002-000000012.pdf").is_file()
+    assert not list((op.carpeta / "2026-03").rglob("*.xml"))   # ningún XML
+    assert not (op.carpeta / "2026-03" / "recibidos").exists()  # todo va a la carpeta PDF
+    # consolidado: 53 compras + 2 ventas + 1 retención, menos 1 anulado (rec[0])
+    cons = pdf / "Consolidado 2026-03.pdf"
+    lector = PdfReader(str(cons))
+    assert len(lector.pages) == 55
+    grupos = [o.title for o in lector.outline if not isinstance(o, list)]
+    assert grupos == ["Compras", "Retenciones compras", "Ventas"]
+    assert any("55 documento(s), 55 página(s); se dejaron fuera 1 anulado(s)" in a for a in avisos)
 
 
-def test_solo_pdf_despues_de_xml_baja_los_pdf_que_faltan(escenario):
+def test_solo_pdf_despues_de_xml_copia_y_baja_los_pdf(escenario):
     falso, op, rec, *_ = escenario
     op.emitidos = op.anulados = False
-    _correr(tareas.descargar(op), falso, [])            # primero XML
-    op.solo_pdf = True
-    res = _correr(tareas.descargar(op), PortalFalso(falso.recibidos, {}, []), [])
-    carpeta = op.carpeta / "2026-03" / "recibidos" / "facturas"
-    assert res.completo and res.pdf == 53
-    assert len(list(carpeta.glob("*.xml"))) == 53 and len(list(carpeta.glob("*.pdf"))) == 53
+    op.con_pdf = True
+    _correr(tareas.descargar(op), falso, [])            # primero XML y PDF en recibidos/
+    (op.carpeta / "2026-03" / "recibidos" / "facturas").joinpath(
+        "2026-03-01 PROVEEDOR FICTICIO Factura 001-001-000000001.pdf").unlink()
+    op.con_pdf, op.solo_pdf = False, True
+    p2 = PortalFalso(falso.recibidos, {}, [])
+    res = _correr(tareas.descargar(op), p2, [])
+    compras = op.carpeta / "2026-03" / "PDF" / "Compras"
+    assert res.completo and len(list(compras.glob("*.pdf"))) == 53
+    assert res.pdf == 1   # solo se bajó el que faltaba; los otros 52 se copiaron
+    assert len(list((op.carpeta / "2026-03" / "recibidos" / "facturas").glob("*.xml"))) == 53
