@@ -116,14 +116,14 @@ class Asistente(QDialog):
         modo.setTextFormat(Qt.RichText)
         l.addWidget(modo)
         self.grupo_modo = QButtonGroup(self)
-        actual = str(self.ajustes.value("modo_navegador", "oculto") or "oculto")
+        actual = str(self.ajustes.value("modo_navegador", "minimizado") or "minimizado")
         for valor, texto in (
-                ("oculto", "Oculto: sin ninguna ventana (recomendado). Si el SRI pide algo, se muestra solo."),
-                ("minimizado", "Minimizado: aparece en la barra de tareas, sin taparte."),
+                ("minimizado", "Minimizado (recomendado): queda en la barra de tareas sin taparte; "
+                               "se muestra solo si el SRI pide algo."),
                 ("visible", "Visible: ver lo que hace la app en el SRI.")):
             r = QRadioButton(texto)
             r.setProperty("modo", valor)
-            r.setChecked(valor == actual)
+            r.setChecked(valor == actual or (actual not in ("minimizado", "visible") and valor == "minimizado"))
             self.grupo_modo.addButton(r)
             l.addWidget(r)
         l.addStretch(1)
@@ -228,7 +228,7 @@ class Asistente(QDialog):
         b = self.grupo_nav.checkedButton()
         self.ajustes.setValue("navegador", b.property("ruta") if b else "")
         m = self.grupo_modo.checkedButton()
-        self.ajustes.setValue("modo_navegador", m.property("modo") if m else "oculto")
+        self.ajustes.setValue("modo_navegador", m.property("modo") if m else "minimizado")
         self.ajustes.setValue("carpeta", self.carpeta.text().strip() or carpeta_por_defecto())
         self.ajustes.setValue("configurado", "si")
         self.accept()

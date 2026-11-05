@@ -150,11 +150,13 @@ class Navegador:
         except Exception:
             return False
 
-    def abrir(self, url: str, ejecutable: str | None = None, oculto: bool = False) -> str:
+    def abrir(self, url: str, ejecutable: str | None = None) -> str:
         """Abre el navegador (o reutiliza el ya abierto) y devuelve su nombre.
 
-        oculto=True: sin ninguna ventana (headless). Si el SRI no lo acepta, la
-        aplicación lo vuelve a abrir visible (reabrir_visible)."""
+        Siempre con ventana: el SRI deja colgadas las conexiones de un navegador
+        sin ventana (headless), así que ese modo no se usa."""
+        if self.disponible() and self.es_oculto():
+            self.cerrar_navegador()  # quedó de una versión anterior: no sirve
         if self.disponible():
             self._asegurar_pestana(url)
             return "navegador ya abierto"
@@ -171,7 +173,7 @@ class Navegador:
                 # que la página siga trabajando aunque la ventana esté minimizada
                 "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
                 "--disable-backgrounding-occluded-windows",
-                "--window-size=1100,800"] + (["--headless=new"] if oculto else ["--new-window"]) + [url]
+                "--window-size=1100,800", "--new-window", url]
         self.ejecutable = exe
         extra = {}
         if sys.platform.startswith("win"):
@@ -223,7 +225,7 @@ class Navegador:
 
         p = self._asegurar_pestana()
         if self._ws is None:
-            self._ws = websocket.create_connection(p["webSocketDebuggerUrl"], timeout=30,
+            self._ws = websocket.create_connection(p["webSocketDebuggerUrl"], timeout=10,
                                                    suppress_origin=True)
 
     def _llamar(self, metodo: str, params: dict, timeout: float = 60) -> dict:
@@ -359,5 +361,5 @@ class Navegador:
             return False
         self.cerrar_navegador()
         time.sleep(1.0)  # que el perfil quede libre
-        self.abrir(url, oculto=False)
+        self.abrir(url)
         return True

@@ -6,9 +6,11 @@ import html
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QStandardPaths, QTimer, QUrl
+import threading
+
+from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QProgressBar, QPushButton, QScrollArea, QSpinBox, QTextEdit,
                                QToolButton, QVBoxLayout, QWidget)
@@ -35,6 +37,11 @@ QLabel#empresa { font-size:13px; font-weight:bold; }
 """
 
 
+class _SenalDetector(QObject):
+    listo = Signal(object)
+    mensaje = Signal(str, str)
+
+
 class Ventana(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -53,6 +60,10 @@ class Ventana(QMainWindow):
         self.motor.terminado.connect(self._terminado)
         self.motor.ingreso.connect(self._ingreso_correcto)
         self._pendiente: tuple[str, str, str] | None = None
+        self._detectando = False
+        self._senal_detector = _SenalDetector()
+        self._senal_detector.listo.connect(self._empresa_detectada)
+        self._senal_detector.mensaje.connect(self._log)
 
         panel = self._panel()
         scroll = QScrollArea()
@@ -90,7 +101,7 @@ class Ventana(QMainWindow):
 
         exe = str(self.ajustes.value("navegador", "") or "") or buscar_ejecutable()
         if exe and Path(exe).is_file() or (exe and not Path(exe).is_absolute()):
-            modo = {"oculto": "oculto", "minimizado": "minimizado", "visible": "visible"}[self._modo_navegador()]
+            modo = self._modo_navegador()
             self.lbl_navegador.setText(f"Navegador: {nombre_navegador(exe)} ({modo})")
         else:
             self.lbl_navegador.setText("Navegador: ninguno — pulsa Configuración")
@@ -296,23 +307,25 @@ class Ventana(QMainWindow):
         if exe and not Path(exe).is_file():
             exe = None
         modo = self._modo_navegador()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            self.nav.abrir(portal.INICIO, exe, oculto=(modo == "oculto"))
+            self.nav.abrir(portal.INICIO, exe)
         except NavegadorError as e:
+            QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, NOMBRE_APP, str(e))
             return False
+        QApplication.restoreOverrideCursor()
         self._abierto_por_app = True
         self.motor.ocultar_navegador = modo != "visible"
         if modo == "minimizado":
             self.nav.minimizar()
-        if modo != "visible":
             self.raise_()
             self.activateWindow()
         return True
 
     def _modo_navegador(self) -> str:
-        m = str(self.ajustes.value("modo_navegador", "oculto") or "oculto")
-        return m if m in ("oculto", "minimizado", "visible") else "oculto"
+        m = str(self.ajustes.value("modo_navegador", "minimizado") or "minimizado")
+        return m if m in ("minimizado", "visible") else "minimizado"  # «oculto» ya no existe
 
     # --- empresas guardadas -------------------------------------------------------
 
@@ -407,61 +420,75 @@ class Ventana(QMainWindow):
         self._cargar_empresas((usuario, ci))
 
     def _ver_navegador(self):
-        if self.nav.disponible() and self.nav.es_oculto():
-            if QMessageBox.question(
-                    self, NOMBRE_APP,
-                    "El navegador está trabajando oculto. Para mostrarlo hay que volver a abrirlo y "
-                    "la sesión del SRI se cierra (al descargar, la app vuelve a entrar sola).\n\n¿Mostrarlo?") \
-                    != QMessageBox.Yes:
-                return
-            try:
-                self.nav.reabrir_visible(portal.INICIO)
-            except NavegadorError as e:
-                QMessageBox.warning(self, NOMBRE_APP, str(e))
-                return
-            self._abierto_por_app = True
-            self.nav.mostrar()
-            return
-        if not self.nav.disponible():
+        if not self.nav.disponible() or self.nav.es_oculto():
             exe = str(self.ajustes.value("navegador", "") or "") or None
+            QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                self.nav.abrir(portal.INICIO, exe if exe and Path(exe).is_file() else None, oculto=False)
+                self.nav.abrir(portal.INICIO, exe if exe and Path(exe).is_file() else None)
             except NavegadorError as e:
+                QApplication.restoreOverrideCursor()
                 QMessageBox.warning(self, NOMBRE_APP, str(e))
                 return
+            QApplication.restoreOverrideCursor()
             self._abierto_por_app = True
         self.nav.mostrar()
 
     def _cerrar_sesion(self):
-        if self.motor.ocupado or not self.nav.disponible():
+        if self.motor.ocupado or not self.empresa:
             return
         if QMessageBox.question(self, NOMBRE_APP, "¿Cerrar la sesión del SRI?") != QMessageBox.Yes:
             return
-        try:
-            self.nav.borrar_cookies()
-            self.nav.navegar(portal.INICIO, 30)
-        except NavegadorError as e:
-            self._log(str(e), "error")
         self.empresa = None
         self.lbl_empresa.setText("Empresa: sin sesión")
-        self._log("Sesión del SRI cerrada.", "info")
         self._actualizar_botones()
 
+        def trabajo():
+            try:
+                self.nav.borrar_cookies()
+                self.nav.navegar(portal.INICIO, 30)
+                msg = ("Sesión del SRI cerrada.", "info")
+            except Exception as e:
+                msg = (f"No se pudo cerrar la sesión: {e}", "error")
+            self._senal_detector.mensaje.emit(*msg)
+
+        threading.Thread(target=trabajo, daemon=True).start()
+
     def _detectar_empresa(self):
-        if self.motor.ocupado:
+        """Lee en segundo plano qué empresa tiene la sesión abierta (nunca bloquea la ventana)."""
+        if self.motor.ocupado or self._detectando:
             return
-        if not self.nav.disponible():
-            if self.empresa:
+        self._detectando = True
+
+        def trabajo():
+            res = {"abierto": False, "emp": None}
+            try:
+                if self.nav.disponible():
+                    if self.nav.es_oculto():  # navegador sin ventana de una versión anterior: no sirve
+                        self.nav.cerrar_navegador()
+                        res["huerfano"] = True
+                    else:
+                        res["abierto"] = True
+                        v = self.nav.evaluar(portal.empresa(), 3)
+                        if isinstance(v, dict) and not v.get("login"):
+                            res["emp"] = v.get("emp")
+            except Exception:
+                pass
+            self._senal_detector.listo.emit(res)
+
+        threading.Thread(target=trabajo, daemon=True).start()
+
+    def _empresa_detectada(self, res: dict):
+        self._detectando = False
+        if res.get("huerfano"):
+            self._log("Se cerró un navegador oculto que había quedado de una vez anterior.", "info")
+        emp = res.get("emp")
+        if not res.get("abierto") or not emp:
+            if self.empresa and not res.get("abierto"):
                 self.empresa = None
                 self.lbl_empresa.setText("Empresa: sin sesión")
                 self._actualizar_botones()
             return
-        try:
-            v = self.nav.evaluar(portal.empresa(), 3)
-        except NavegadorError:
-            return
-        emp = v.get("emp") if isinstance(v, dict) and not v.get("login") else None
-        if emp and (not self.empresa or emp["ruc"] != self.empresa["ruc"]):
+        if not self.empresa or emp["ruc"] != self.empresa["ruc"]:
             self.empresa = emp
             self.lbl_empresa.setText(f"Sesión abierta: {emp['ruc']}\n{emp.get('razon', '')}")
             self._actualizar_botones()
