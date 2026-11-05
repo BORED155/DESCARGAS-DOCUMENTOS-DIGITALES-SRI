@@ -128,11 +128,17 @@ def esperar_condicion(codigo: str, cond: Callable[[Any], bool], timeout_s: float
     raise Falla(f"El portal no respondió a tiempo ({que}).")
 
 
-def comprobar_sesion() -> Tarea:
-    v = yield Js(portal.empresa())
-    if not v or not v.get("emp") or v.get("login"):
-        raise Falla("La sesión del SRI está cerrada. Vuelve a entrar con tu RUC y clave y pulsa Descargar otra vez.")
-    return v["emp"]
+def comprobar_sesion(intentos: int = 15) -> Tarea:
+    """Empresa de la sesión abierta (reintenta mientras la página termina de cargar)."""
+    v = None
+    for _ in range(intentos):
+        v = yield Js(portal.empresa())
+        if v and v.get("login"):
+            break
+        if v and v.get("emp"):
+            return v["emp"]
+        yield Esperar(1000)
+    raise Falla("La sesión del SRI está cerrada. Vuelve a entrar con tu RUC y clave y pulsa Descargar otra vez.")
 
 
 def esperar_consulta(sufijo: str, entera: bool = True, timeout_s: float = 90) -> Tarea:
@@ -350,6 +356,38 @@ def procesar_recibidos(op: Opciones, regs: Registros, res: Resumen, cols: list[s
                         "Vuelve a entrar y pulsa Descargar: lo ya bajado no se repite.")
 
 
+def _captcha_rechazado(e: dict) -> bool:
+    return "captcha" in (e.get("mensajes") or "").lower()
+
+
+def consultar_recibidos_verificado(op: Opciones, mes: int, tipo: str, reintentos: int = 2,
+                                   espera_reintento_ms: int = 10_000) -> Tarea:
+    """Consulta recibidos. Si el SRI rechaza el reCAPTCHA invisible («Captcha incorrecta»),
+    reintenta y, si sigue, pide al usuario que pulse «Consultar» en la ventana del SRI."""
+    sufijo = "tablaCompRecibidos"
+    for intento in range(reintentos + 1):
+        r = yield Js(portal.consultar_recibidos(op.anio, mes, tipo))
+        if not r or not r.get("ok"):
+            raise Falla((r or {}).get("e", "No se pudo consultar recibidos"))
+        e = yield from esperar_consulta(sufijo, entera=True)
+        if not _captcha_rechazado(e):
+            return e
+        if intento < reintentos:
+            yield Aviso(f"El SRI respondió «{e['mensajes']}»; reintento en {espera_reintento_ms // 1000} s.", "alerta")
+            yield Esperar(espera_reintento_ms)
+    # Lo resuelve el usuario: los filtros ya están puestos en la página.
+    yield Js(portal.js("D.marcar(); return true;"))
+    yield Captcha(True)
+    yield Aviso("El SRI no aceptó la verificación automática. En la ventana del SRI pulsa «Consultar» "
+                "(los filtros ya están puestos); la descarga sigue sola.", "alerta")
+    while True:
+        e = yield from esperar_consulta(sufijo, entera=True, timeout_s=1800)
+        if not _captcha_rechazado(e):
+            yield Captcha(False)
+            return e
+        yield Js(portal.js("D.marcar(); return true;"))
+
+
 def tarea_recibidos(op: Opciones, regs: Registros, res: Resumen, mes: int, avance: Callable[[str], Tarea]) -> Tarea:
     sufijo = "tablaCompRecibidos"
     yield Navegar(portal.URL_RECIBIDOS)
@@ -358,10 +396,7 @@ def tarea_recibidos(op: Opciones, regs: Registros, res: Resumen, mes: int, avanc
     for tipo in op.tipos_recibidos:
         nombre = portal.TIPOS_PORTAL[tipo]
         yield from avance(f"Recibidos {mes:02d}/{op.anio}: {nombre}")
-        r = yield Js(portal.consultar_recibidos(op.anio, mes, tipo))
-        if not r or not r.get("ok"):
-            raise Falla((r or {}).get("e", "No se pudo consultar recibidos"))
-        e = yield from esperar_consulta(sufijo, entera=True)
+        e = yield from consultar_recibidos_verificado(op, mes, tipo)
         if e.get("filas", 0) <= 0:
             yield Aviso(f"Recibidos {mes:02d}/{op.anio} · {nombre}: ninguno")
             continue

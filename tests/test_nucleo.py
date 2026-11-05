@@ -108,6 +108,8 @@ class PortalFalso:
         self.pag = 0
         self.seccion = ""
         self.consultas = 0
+        self.rechazos = 0       # cuántas consultas de recibidos responden «Captcha incorrecta»
+        self.rechazado = False
 
     def js(self, codigo: str):
         t = codigo[len(portal.LIB):] if codigo.startswith(portal.LIB) else codigo
@@ -117,13 +119,22 @@ class PortalFalso:
             mes = int(re.search(r"D\.elegir\(g\('mes'\), '(\d+)'\)", t).group(1))
             tipo = re.search(r"cmbTipoComprobante'\), '(\d)'\)", t).group(1)
             self._poner([(c, x) for c, x in self.recibidos.get((mes, tipo), [])], "rec")
+            self.rechazado = self.rechazos > 0
+            if self.rechazado:
+                self.rechazos -= 1
             return {"ok": True}
+        if t.strip().startswith("const D = window.__dds; D.marcar(); return true;") or "D.marcar(); return true;" in t:
+            self.marcado_manual = getattr(self, "marcado_manual", 0) + 1
+            self.rechazado = False  # el usuario pulsa Consultar
+            return True
         if "g('btnConsultar').click()" in t:
             f = re.search(r"c\.value = '([\d/]+)'", t).group(1)
             tipo = re.search(r"cmbTipoComprobante'\), '(\d)'\)", t).group(1)
             self._poner([(c, None) for c in self.emitidos.get((f, tipo), [])], "emi")
             return {"ok": True}
         if "D.estado(" in t:
+            if self.rechazado:
+                return {"libre": True, "captcha": False, "filas": -1, "mensajes": "Captcha incorrecta"}
             n = len(self._visibles())
             return {"libre": True, "captcha": False, "filas": n,
                     "mensajes": "" if n else "No existen datos para los parámetros ingresados"}
@@ -310,3 +321,34 @@ def test_columnas_por_titulo():
                            "Valor sin impuestos", "IVA", "Importe Total"])
     assert pos == {"emisor": 1, "tipo_serie": 2, "clave": 3, "fecha_aut": 4, "fecha_emi": 5,
                    "sin_imp": 6, "iva": 7, "total": 8}
+
+
+def test_captcha_rechazado_reintenta_y_pide_al_usuario(escenario):
+    falso, op, rec, *_ = escenario
+    op.emitidos = op.anulados = False
+    falso.rechazos = 3  # 1 consulta + 2 reintentos rechazados → se pide al usuario
+    avisos: list = []
+    capt: list = []
+    gen = tareas.descargar(op)
+    valor = None
+    while True:
+        try:
+            orden = gen.send(valor)
+        except StopIteration as fin:
+            res = fin.value
+            break
+        valor = None
+        if isinstance(orden, tareas.Js):
+            valor = json.loads(json.dumps(falso.js(orden.codigo)))
+        elif isinstance(orden, tareas.JsAsync):
+            valor = falso.bajar(orden.codigo)
+        elif isinstance(orden, tareas.Navegar):
+            falso.navegar(orden.url)
+        elif isinstance(orden, tareas.Aviso):
+            avisos.append(orden.texto)
+        elif isinstance(orden, tareas.Captcha):
+            capt.append(orden.visible)
+    assert res.xml_portal == 53
+    assert capt == [True, False]
+    assert sum("reintento" in a for a in avisos) == 2
+    assert any("pulsa «Consultar»" in a for a in avisos)

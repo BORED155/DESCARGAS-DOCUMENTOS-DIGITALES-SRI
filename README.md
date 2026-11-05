@@ -4,11 +4,20 @@ Descarga masiva de comprobantes electrónicos del portal **SRI en línea** (Ecua
 Aplicación de escritorio en Python + PySide6 (Linux y Windows).
 
 ## Cómo se usa
-1. Abre la app: a la izquierda está el portal del SRI. Entra con tu RUC y clave
-   (la app no ve ni guarda la clave; el navegador interno no guarda nada en disco).
-2. Elige año, meses, qué descargar y los tipos de comprobante.
-3. Pulsa **Descargar**. Si el SRI muestra un captcha de imágenes, la app se pausa
-   hasta que lo resuelvas.
+1. Pulsa **Abrir el SRI en Brave**: se abre una ventana de Brave (o Chrome) con un
+   perfil propio de la app, separado del perfil personal. Entra ahí con tu RUC y clave
+   (la app no ve ni guarda la clave).
+2. La app detecta la empresa en la cabecera del portal.
+3. Elige año, meses, qué descargar y los tipos de comprobante, y pulsa **Descargar**.
+4. Si el SRI rechaza la verificación («Captcha incorrecta»), la app reintenta y, si
+   sigue, te pide pulsar «Consultar» en la ventana del SRI; luego continúa sola.
+
+### ¿Por qué Brave y no un navegador dentro de la app?
+La consulta de recibidos usa reCAPTCHA Enterprise invisible. Con el navegador de Qt el
+SRI responde «Captcha incorrecta»; con Brave/Chrome la consulta pasa normalmente. La app
+no intenta engañar ni saltar el captcha: usa un navegador real donde el usuario está
+presente. El control de Brave es por DevTools en 127.0.0.1, solo mientras esa ventana
+esté abierta.
 
 ## Qué baja
 | Sección | Cómo | Resultado |

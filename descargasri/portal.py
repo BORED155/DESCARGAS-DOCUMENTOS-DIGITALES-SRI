@@ -33,13 +33,18 @@ FILAS_POR_PAGINA = 500
 # Biblioteca que se inyecta en cada llamada (las páginas JSF recargan y la pierden).
 LIB = r"""
 (function(){
-if (window.__dds && window.__dds.v === 3) return;
-const D = {v: 3, R: {}};
+if (window.__dds && window.__dds.v === 6) return;
+const D = {v: 6, R: {}};
 D.g = id => document.getElementById('frmPrincipal:' + id);
 D.widget = suf => {
+  // Los widgets de PrimeFaces son variables globales con .cfg.id. Se saltan los
+  // marcos (p. ej. el del reCAPTCHA, de otro dominio): leerlos lanza SecurityError.
   for (const k of Object.keys(window)) {
-    let v; try { v = window[k]; } catch (e) { continue; }
-    if (v && v.cfg && typeof v.cfg.id === 'string' && v.cfg.id.endsWith(suf)) return v;
+    if (/^\d+$/.test(k)) continue;
+    try {
+      const v = window[k];
+      if (v && v.cfg && typeof v.cfg.id === 'string' && v.cfg.id.endsWith(suf)) return v;
+    } catch (e) { /* marco de otro origen */ }
   }
   return null;
 };
@@ -111,10 +116,26 @@ D.elegir = (sel, valor) => {
   sel.dispatchEvent(new Event('change', {bubbles: true}));
   return true;
 };
+// Empresa de la sesión: se lee de la cabecera del usuario (div.area-usuario-blue en
+// las páginas JSF, div.nombre-contribuyente en el portal nuevo). Se busca un texto
+// que sea solo el RUC, fuera de tablas y diálogos, y la razón social a su lado.
+// Nunca del contenido de las tablas (ahí hay RUC de proveedores).
 D.empresa = () => {
-  const txt = (document.body && document.body.innerText || '').slice(0, 400);
-  const m = txt.match(/(\d{10}(?:\d{3})?)\s*\n\s*([^\n]{2,120})/);
-  return m ? {ruc: m[1], razon: m[2].trim()} : null;
+  if (!document.body) return null;
+  const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = w.nextNode())) {
+    const ruc = n.textContent.trim();
+    if (!/^\d{13}$/.test(ruc)) continue;
+    const e = n.parentElement;
+    if (!e || e.closest('table, .ui-dialog, form[id^="form-detalle"], input, textarea')) continue;
+    for (let p = e, k = 0; p && k < 3; p = p.parentElement, k++) {
+      const lineas = (p.innerText || '').split('\n').map(x => x.replace(ruc, '').trim()).filter(Boolean);
+      const razon = lineas.find(x => /[A-Za-zÁÉÍÓÚÑáéíóúñ]{2}/.test(x) && x.length < 120);
+      if (razon) return {ruc, razon};
+    }
+  }
+  return null;
 };
 D.clicTexto = texto => {
   const a = [...document.querySelectorAll('a, button')].find(x => x.innerText && x.innerText.trim().toLowerCase() === texto.toLowerCase());

@@ -6,18 +6,16 @@ import html
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QStandardPaths, Qt, QTimer, QUrl
+from PySide6.QtCore import QSettings, QStandardPaths, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
-from PySide6.QtWebEngineCore import (QWebEngineDownloadRequest, QWebEnginePage, QWebEngineProfile,
-                                     QWebEngineScript)
-from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplitter,
-                               QTextEdit, QToolButton, QVBoxLayout, QWidget)
+                               QProgressBar, QPushButton, QScrollArea, QSpinBox, QTextEdit,
+                               QVBoxLayout, QWidget)
 
 from .. import __version__, portal
 from ..motor import Motor
+from ..navegador import Navegador, NavegadorError, buscar_ejecutable, nombre_navegador
 from ..tareas import Opciones, descargar
 
 NOMBRE_APP = "Descargas Documentos Digitales SRI"
@@ -31,16 +29,10 @@ QPushButton#descargar:disabled { background:#a5c9a7; }
 QPushButton#detener { background:#c62828; color:white; font-weight:bold; padding:8px; border-radius:4px; }
 QPushButton#detener:disabled { background:#e3a5a5; }
 QPushButton#sesion { background:#222; color:white; padding:6px; border-radius:4px; }
+QPushButton#abrir { background:#1565c0; color:white; font-weight:bold; padding:8px; border-radius:4px; }
 QLabel#captcha { background:#fff3cd; color:#7a5200; border:1px solid #e0b84c; padding:8px; font-weight:bold; }
 QLabel#empresa { font-size:13px; font-weight:bold; }
 """
-
-
-class Pagina(QWebEnginePage):
-    """Abre en la misma pestaña los enlaces que el SRI manda a ventana nueva."""
-
-    def createWindow(self, _tipo):
-        return self
 
 
 class Ventana(QMainWindow):
@@ -51,65 +43,52 @@ class Ventana(QMainWindow):
         self.ajustes = QSettings("Leninsodu", "DescargasSRI")
         self.empresa: dict | None = None
 
-        # Perfil sin disco (off-the-record): no se guardan cookies, historial ni claves.
-        self.perfil = QWebEngineProfile(self)
-        self.perfil.downloadRequested.connect(self._descarga_manual)
-        self.vista = QWebEngineView(self)
-        self.pagina = Pagina(self.perfil, self.vista)
-        self.vista.setPage(self.pagina)
+        datos = Path(QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation))
+        self.nav = Navegador(datos / "perfil-navegador")
 
-        self.motor = Motor(self.pagina, self)
+        self.motor = Motor(self.nav, self)
         self.motor.aviso.connect(self._log)
         self.motor.progreso.connect(self._progreso)
         self.motor.captcha.connect(self._captcha)
         self.motor.terminado.connect(self._terminado)
 
-        barra = QWidget()
-        bl = QHBoxLayout(barra)
-        bl.setContentsMargins(4, 2, 4, 2)
-        for texto, fn in (("◀", self.vista.back), ("▶", self.vista.forward), ("⟳", self.vista.reload),
-                          ("Inicio SRI", lambda: self.vista.load(QUrl(portal.INICIO)))):
-            b = QToolButton()
-            b.setText(texto)
-            b.clicked.connect(fn)
-            bl.addWidget(b)
-        self.url = QLabel()
-        self.url.setStyleSheet("color:#666")
-        bl.addWidget(self.url, 1)
-        self.vista.urlChanged.connect(lambda u: self.url.setText(u.toString()[:140]))
-
-        izq = QWidget()
-        il = QVBoxLayout(izq)
-        il.setContentsMargins(0, 0, 0, 0)
-        il.setSpacing(0)
-        il.addWidget(barra)
-        il.addWidget(self.vista, 1)
-
-        split = QSplitter(Qt.Horizontal)
-        split.addWidget(izq)
-        split.addWidget(self._panel())
-        split.setStretchFactor(0, 1)
-        split.setSizes([1050, 400])
-        self.setCentralWidget(split)
+        panel = self._panel()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(panel)
+        self.setCentralWidget(scroll)
+        self.resize(520, 900)
         self.setStyleSheet(ESTILO_BOTONES)
 
-        self.vista.load(QUrl(portal.INICIO))
         self._reloj = QTimer(self)
         self._reloj.timeout.connect(self._detectar_empresa)
-        self._reloj.start(2500)
+        self._reloj.start(3000)
         self._actualizar_botones()
+        exe = buscar_ejecutable()
+        self._log(f"Navegador: {exe}" if exe else "No encontré Brave ni Chrome: instala uno de los dos.",
+                  "info" if exe else "error")
+        if self.nav.disponible():
+            self.lbl_nav.setText("Navegador del SRI: abierto")
 
     # --- panel ---------------------------------------------------------------
 
     def _panel(self) -> QWidget:
         p = QWidget()
-        p.setMinimumWidth(360)
+        p.setMinimumWidth(420)
         lay = QVBoxLayout(p)
 
-        ayuda = QLabel("1. Entra al SRI en línea en la página de la izquierda con tu RUC y clave "
+        ayuda = QLabel("1. Pulsa «Abrir el SRI en Brave» y entra con tu RUC y clave en esa ventana "
                        "(la app no ve ni guarda tu clave).\n2. Elige periodo y qué bajar.\n3. Pulsa Descargar.")
         ayuda.setWordWrap(True)
         lay.addWidget(ayuda)
+
+        self.btn_abrir = QPushButton("Abrir el SRI en Brave")
+        self.btn_abrir.setObjectName("abrir")
+        self.btn_abrir.clicked.connect(self._abrir_navegador)
+        lay.addWidget(self.btn_abrir)
+        self.lbl_nav = QLabel("Navegador del SRI: cerrado")
+        self.lbl_nav.setStyleSheet("color:#555")
+        lay.addWidget(self.lbl_nav)
 
         self.lbl_empresa = QLabel("Empresa: sin sesión")
         self.lbl_empresa.setObjectName("empresa")
@@ -200,6 +179,7 @@ class Ventana(QMainWindow):
         self.registro = QTextEdit()
         self.registro.setReadOnly(True)
         self.registro.setFont(QFont("Monospace", 9))
+        self.registro.setMinimumHeight(220)
         lay.addWidget(self.registro, 1)
 
         self.btn_sesion = QPushButton("Cerrar sesión / cambiar de empresa")
@@ -225,43 +205,57 @@ class Ventana(QMainWindow):
         ruta.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(ruta)))
 
-    def _cerrar_sesion(self):
-        if self.motor.ocupado:
+    def _abrir_navegador(self):
+        try:
+            nombre = self.nav.abrir(portal.INICIO)
+        except NavegadorError as e:
+            QMessageBox.warning(self, NOMBRE_APP, str(e))
             return
-        self.perfil.cookieStore().deleteAllCookies()
-        self.perfil.clearHttpCache()
+        self.lbl_nav.setText("Navegador del SRI: abierto")
+        self._log(f"Se abrió el SRI ({nombre}). Entra con tu RUC y clave en esa ventana.", "info")
+        self.nav.traer_al_frente()
+
+    def _cerrar_sesion(self):
+        if self.motor.ocupado or not self.nav.disponible():
+            return
+        try:
+            self.nav.borrar_cookies()
+            self.nav.navegar(portal.INICIO, 30)
+        except NavegadorError as e:
+            self._log(str(e), "error")
         self.empresa = None
         self.lbl_empresa.setText("Empresa: sin sesión")
-        self.vista.load(QUrl(portal.INICIO))
-        self._log("Sesión cerrada. Entra con la otra empresa.", "info")
+        self._log("Sesión cerrada. Entra con la otra empresa en la ventana del SRI.", "info")
         self._actualizar_botones()
 
     def _detectar_empresa(self):
         if self.motor.ocupado:
             return
-        if portal.DOMINIO not in self.vista.url().host():
-            return
-
-        def listo(r):
-            import json
-            try:
-                v = json.loads(r) if isinstance(r, str) else None
-            except ValueError:
-                v = None
-            emp = v.get("emp") if v and not v.get("login") else None
-            if emp and (not self.empresa or emp["ruc"] != self.empresa["ruc"]):
-                self.empresa = emp
-                self.lbl_empresa.setText(f"Empresa: {emp['ruc']}\n{emp.get('razon', '')}")
-                self._log(f"Sesión detectada: {emp['ruc']} {emp.get('razon', '')}", "ok")
+        if not self.nav.disponible():
+            self.lbl_nav.setText("Navegador del SRI: cerrado")
+            if self.empresa:
+                self.empresa = None
+                self.lbl_empresa.setText("Empresa: sin sesión")
                 self._actualizar_botones()
-
-        self.pagina.runJavaScript(portal.empresa(), QWebEngineScript.MainWorld, listo)
+            return
+        self.lbl_nav.setText("Navegador del SRI: abierto")
+        try:
+            v = self.nav.evaluar(portal.empresa(), 3)
+        except NavegadorError:
+            return
+        emp = v.get("emp") if isinstance(v, dict) and not v.get("login") else None
+        if emp and (not self.empresa or emp["ruc"] != self.empresa["ruc"]):
+            self.empresa = emp
+            self.lbl_empresa.setText(f"Empresa: {emp['ruc']}\n{emp.get('razon', '')}")
+            self._log(f"Sesión detectada: {emp['ruc']} {emp.get('razon', '')}", "ok")
+            self._actualizar_botones()
 
     def _actualizar_botones(self):
         ocupado = self.motor.ocupado
         self.btn_descargar.setEnabled(not ocupado and self.empresa is not None)
         self.btn_detener.setEnabled(ocupado)
         self.btn_sesion.setEnabled(not ocupado)
+        self.btn_abrir.setEnabled(not ocupado)
 
     def _guardar_ajustes(self):
         a = self.ajustes
@@ -351,12 +345,6 @@ class Ventana(QMainWindow):
         if not ok:
             QMessageBox.information(self, NOMBRE_APP, msg)
 
-    def _descarga_manual(self, d: QWebEngineDownloadRequest):
-        carpeta = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation)
-        d.setDownloadDirectory(carpeta)
-        d.accept()
-        self._log(f"Descarga manual: {Path(carpeta) / d.downloadFileName()}", "info")
-
     def closeEvent(self, e):
         if self.motor.ocupado:
             r = QMessageBox.question(self, NOMBRE_APP, "Hay una descarga en curso. ¿Detenerla y salir?")
@@ -364,8 +352,7 @@ class Ventana(QMainWindow):
                 e.ignore()
                 return
             self.motor.detener()
+            self.motor.esperar_fin(8000)
         self._guardar_ajustes()
-        # liberar la página antes que el perfil (evita avisos de Qt al cerrar)
-        self.vista.setPage(None)
-        self.pagina.deleteLater()
+        self.nav.cerrar()
         super().closeEvent(e)
