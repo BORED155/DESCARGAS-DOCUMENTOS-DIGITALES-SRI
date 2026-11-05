@@ -317,9 +317,15 @@ def test_sesion_de_otra_empresa(escenario):
         ejecutar(tareas.descargar(op), falso, [])
 
 
-def test_dias_del_mes_no_pasa_de_hoy():
+def test_dias_del_mes_hasta_ayer():
     assert len(tareas.dias_del_mes(2026, 2, date(2026, 11, 5))) == 28
-    assert tareas.dias_del_mes(2026, 11, date(2026, 11, 5))[-1] == date(2026, 11, 5)
+    dias = tareas.dias_del_mes(2026, 11, date(2026, 11, 5))
+    assert dias[0] == date(2026, 11, 1) and dias[-1] == date(2026, 11, 4)   # hoy no: el SRI no lo acepta
+    assert tareas.dias_del_mes(2026, 11, date(2026, 11, 1)) == []           # día 1: aún nada
+
+
+def test_mensaje_fecha_futura_no_se_reintenta():
+    assert tareas.sin_resultados({"filas": -1, "mensajes": "La fecha ingresada debe ser menor a la fecha actual"})
 
 
 def test_columnas_por_titulo():

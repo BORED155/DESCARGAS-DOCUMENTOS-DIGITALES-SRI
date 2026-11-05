@@ -582,12 +582,15 @@ def iterar_paginas(sufijo: str, procesar: Callable[[list[str], list[dict]], Tare
     return c
 
 
+FECHA_FUTURA = "menor a la fecha actual"  # el SRI no deja consultar emitidos de hoy
+
+
 def sin_resultados(e: dict) -> bool:
     """La consulta terminó sin filas: solo es válido si el SRI dice que no hay datos."""
     if e.get("filas", 0) > 0:
         return False
     msg = (e.get("mensajes") or "").strip()
-    if NO_HAY_DATOS in msg.lower() or not msg:
+    if NO_HAY_DATOS in msg.lower() or FECHA_FUTURA in msg.lower() or not msg:
         return True
     raise Falla(f"el SRI respondió «{msg}».")
 
@@ -874,8 +877,9 @@ def abrir_emitidos() -> Tarea:
 
 
 def dias_del_mes(anio: int, mes: int, hoy: date) -> list[date]:
+    """Días que se pueden consultar en emitidos: el SRI solo acepta fechas anteriores a hoy."""
     ultimo = calendar.monthrange(anio, mes)[1]
-    return [date(anio, mes, d) for d in range(1, ultimo + 1) if date(anio, mes, d) <= hoy]
+    return [date(anio, mes, d) for d in range(1, ultimo + 1) if date(anio, mes, d) < hoy]
 
 
 TIPO_PORTAL_A_CLAVE = {"1": "01", "2": "03", "3": "04", "4": "05", "5": "06", "6": "07"}
@@ -922,6 +926,9 @@ def tarea_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoServi
                    avance: Callable[[str], Tarea]) -> Tarea:
     yield from abrir_emitidos()
     dias = dias_del_mes(op.anio, mes, op.hoy)
+    if op.hoy.year == op.anio and op.hoy.month == mes:
+        yield Aviso(f"Mes en curso: los emitidos se consultan hasta ayer. Los de hoy ({op.hoy:%d/%m/%Y}) "
+                    "se podrán consultar desde mañana (el SRI no lo permite el mismo día).")
     for tipo in op.tipos_emitidos:
         nombre = portal.TIPOS_PORTAL[tipo]
         total = res.conteo(mes, "emitidos", nombre)
