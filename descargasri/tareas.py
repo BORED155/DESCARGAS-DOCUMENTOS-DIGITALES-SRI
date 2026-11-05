@@ -16,7 +16,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Generator
 
-from . import almacen, portal, soap, xmlinfo
+from . import almacen, portal, soap, verificacion, xmlinfo
 from .clave import Clave, buscar_clave, leer_clave
 
 
@@ -120,6 +120,7 @@ class Opciones:
     con_pdf: bool = False
     pausa_ms: tuple[int, int] = (400, 1000)
     hoy: date = field(default_factory=date.today)
+    reparados: list = field(default_factory=list, repr=False)  # archivos dañados que se volvieron a bajar
     revisar_todo: bool = False  # volver a consultar en el SRI los días de emitidos ya verificados
     dias_recientes: int = 3     # estos últimos días siempre se vuelven a consultar
     cred: "Credenciales | None" = field(default=None, repr=False)
@@ -134,6 +135,7 @@ class Resumen:
     conteos: dict = field(default_factory=dict)  # (mes, sección, tipo) -> Conteo
     completo: bool = False
     anulados_fallidos: bool = False
+    diferencias_reporte: dict = field(default_factory=dict)  # mes -> [Diferencia]
     nuevos: int = 0
     existentes: int = 0
     errores: int = 0
@@ -407,6 +409,18 @@ def existente(op: Opciones, regs: "Registros", seccion: str, clave: Clave, ext: 
     """Archivo ya guardado de ese comprobante (por el registro o con el nombre antiguo).
 
     Si está con el nombre antiguo (la clave), se renombra al formato legible."""
+    encontrado = _existente(op, regs, seccion, clave, ext, contraparte)
+    if encontrado is None or verificacion.archivo_valido(encontrado, clave.texto):
+        return encontrado
+    # No es el comprobante que debería (dañado o cambiado): se aparta y se vuelve a bajar.
+    apartado = encontrado.with_name(encontrado.name + ".dañado")
+    encontrado.replace(apartado)
+    op.reparados.append(encontrado.name)
+    return None
+
+
+def _existente(op: Opciones, regs: "Registros", seccion: str, clave: Clave, ext: str,
+               contraparte: str = "") -> Path | None:
     rmes = regs.de(clave.fecha.year, clave.fecha.month)
     previo = rmes.datos.get(clave.texto)
     if previo:
@@ -795,7 +809,8 @@ def dia_ya_verificado(op: Opciones, regs: Registros, d: date, tipo: str) -> int 
     for r in rmes.datos.values():
         c = leer_clave(r.clave)
         if r.seccion == "emitidos" and c and c.tipo == cod and c.fecha == d and \
-                rmes.archivos_presentes(op.carpeta, r):
+                any((op.carpeta / x).is_file() and verificacion.archivo_valido(op.carpeta / x, r.clave)
+                    for x in r.archivos):
             presentes += 1
     return previo if presentes >= previo else None
 
@@ -981,6 +996,28 @@ def comprobacion(res: Resumen, regs: Registros, op: Opciones) -> Tarea:
             todo_bien = False
             extra = f" · sin consultar: {', '.join(c.fallidos)}" if c.fallidos else ""
             yield Aviso(f"✘ {nombre}: SRI {c.sri} · en carpeta {c.guardados}{extra}", "error")
+    # Revisión de cada archivo guardado (y, si hay, comparación con el reporte del SRI)
+    for mes in sorted({m for (m, _s, _t) in res.conteos}):
+        rmes = regs.de(op.anio, mes)
+        revisados, difs = verificacion.revisar_archivos(op.carpeta, rmes)
+        difs += res.diferencias_reporte.get(mes, [])
+        rmes.diferencias = [d.como_dict() for d in difs]
+        # un día con problemas deja de contar como verificado: se vuelve a consultar
+        clave_a_portal = {v: k for k, v in TIPO_PORTAL_A_CLAVE.items()}
+        for d in difs:
+            c = leer_clave(d.clave)
+            if c and d.seccion == "emitidos":
+                rmes.dias_verificados.pop(f"{clave_a_portal.get(c.tipo)}|{c.fecha.isoformat()}", None)
+        de_archivo = [d for d in difs if d.fuente == "Archivo"]
+        if revisados and not de_archivo:
+            yield Aviso(f"✔ Archivos revisados ({mes:02d}/{op.anio}): los {revisados} comprobantes tienen su "
+                        "archivo correcto (clave y autorización).", "ok")
+        for d in difs[:15]:
+            yield Aviso(f"✘ {d.fuente}: {d.tipo} {d.serie} {d.contraparte} — {d.problema}", "error")
+        if len(difs) > 15:
+            yield Aviso(f"… y {len(difs) - 15} más: ver la hoja «Diferencias» del Excel índice.", "error")
+        if difs:
+            todo_bien = False
     return todo_bien
 
 
@@ -1024,6 +1061,9 @@ def descargar(op: Opciones, cred: Credenciales | None = None) -> Tarea:
                     yield from tarea_emitidos(op, regs, res, srv, mes, avance)
                 if op.anulados:
                     yield from tarea_anulados(op, regs, res, mes, avance)
+            if op.reparados:
+                yield Aviso(f"Se encontraron {len(op.reparados)} archivo(s) dañados o cambiados; se apartaron "
+                            "con la extensión .dañado y se volvieron a bajar del SRI.", "alerta")
             yield Progreso(total, total, "Comprobando")
             yield Aviso("Comprobación (lo que dice el SRI frente a lo que está en la carpeta):")
             res.completo = yield from comprobacion(res, regs, op)

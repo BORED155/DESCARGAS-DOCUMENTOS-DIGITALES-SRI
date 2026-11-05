@@ -12,7 +12,7 @@ from descargasri import almacen, portal, soap, tareas, xmlinfo
 from descargasri.clave import buscar_clave, digito_modulo11, leer_clave
 
 from fabrica import (RUC_CLIENTE, RUC_EMPRESA, RUC_PROVEEDOR, autorizacion, clave, factura_xml,
-                     respuesta_soap)
+                     respuesta_soap, ride_pdf)
 
 
 # --- clave -----------------------------------------------------------------
@@ -87,7 +87,7 @@ def test_registro_fusiona_y_marca_anulados(tmp_path: Path):
     ruta = almacen.escribir_indice(otra, 2026, 3)
     from openpyxl import load_workbook
     wb = load_workbook(ruta)
-    assert wb.sheetnames == ["Resumen", "Recibidos", "Emitidos", "Anulados", "Comprobación"]
+    assert wb.sheetnames == ["Resumen", "Recibidos", "Emitidos", "Anulados", "Comprobación", "Diferencias"]
     assert wb["Recibidos"]["M2"].value == "Sí"
 
 
@@ -224,7 +224,8 @@ class PortalFalso:
         elif link.endswith("lnkXml"):
             cont, tipo = self.filas[k][1], "text/xml"
         else:
-            cont, tipo = b"%PDF-1.4 ficticio", "application/pdf"
+            c = self.filas[k][0]
+            cont, tipo = ride_pdf(c, "CLIENTE " + c[30:39]), "application/pdf"
         return {"ok": True, "v": {"status": 200, "tipo": tipo, "b64": base64.b64encode(cont).decode()}}
 
     def navegar(self, url: str):
@@ -291,8 +292,8 @@ def test_descarga_completa_simulada(escenario):
     assert len(list((mes / "recibidos" / "facturas").glob("*.xml"))) == 53
     # emitido reciente: XML del servicio web; el que el SRI ya no da: PDF
     assert (mes / "emitidos" / "facturas" / "2026-03-02 CLIENTE FICTICIO Factura 001-002-000000454.xml").is_file()
-    assert (mes / "emitidos" / "facturas" / "2026-03-02 SIN NOMBRE Factura 001-002-000000455.pdf").is_file()
-    assert (mes / "emitidos" / "retenciones" / "2026-03-03 SIN NOMBRE Retención 001-002-000000012.pdf").is_file()
+    assert (mes / "emitidos" / "facturas" / "2026-03-02 CLIENTE 000000455 Factura 001-002-000000455.pdf").is_file()
+    assert (mes / "emitidos" / "retenciones" / "2026-03-03 CLIENTE 000000012 Retención 001-002-000000012.pdf").is_file()
     assert (mes / "recibidos" / "facturas" / "2026-03-01 PROVEEDOR FICTICIO Factura 001-001-000000001.xml").is_file()
     assert res.xml_servicio == 1 and res.anulados == 1
     datos = json.loads((mes / "registro.json").read_text(encoding="utf-8"))
@@ -549,7 +550,7 @@ def test_segunda_vez_no_vuelve_a_consultar_dias_verificados(escenario):
     assert any("día(s) ya verificados" in a for a in avisos)
 
     # si se borra un archivo emitido, ese día se vuelve a consultar y se baja solo ese
-    (op.carpeta / "2026-03" / "emitidos" / "facturas" / "2026-03-02 SIN NOMBRE Factura 001-002-000000455.pdf").unlink()
+    (op.carpeta / "2026-03" / "emitidos" / "facturas" / "2026-03-02 CLIENTE 000000455 Factura 001-002-000000455.pdf").unlink()
     p3 = PortalFalso(falso.recibidos, falso.emitidos, falso.anulados)
     res3 = _correr(tareas.descargar(op), p3, [])
     assert res3.completo and res3.nuevos == 1 and p3.consultas == 2
@@ -589,3 +590,56 @@ def test_clave_nueva_se_comprueba_aunque_haya_sesion():
     f2 = LoginFalso(RUC_EMPRESA)
     with pytest.raises(tareas.Falla, match="no aceptó"):
         correr_login(f2, tareas.Credenciales(RUC_EMPRESA, "mala", verificar=True))
+
+
+def test_revision_detecta_archivo_cambiado(escenario):
+    falso, op, rec, *_ = escenario
+    op.emitidos = op.anulados = False
+    _correr(tareas.descargar(op), falso, [])
+    carpeta = op.carpeta / "2026-03" / "recibidos" / "facturas"
+    a, b = sorted(carpeta.iterdir())[:2]
+    a.write_bytes(b.read_bytes())          # un XML reemplazado por otro comprobante
+    sorted(carpeta.iterdir())[5].write_text("<html>error</html>")  # otro dañado
+    avisos: list = []
+    op.reparados = []
+    res = _correr(tareas.descargar(op), PortalFalso(falso.recibidos, {}, []), avisos)
+    # se apartan los dos archivos malos y se vuelven a bajar: queda completo
+    assert res.completo and res.xml_portal == 2
+    assert any("2 archivo(s) dañados o cambiados" in x for x in avisos)
+    assert len(list(carpeta.glob("*.dañado"))) == 2
+    assert len(list(carpeta.glob("*.xml"))) == 53
+    datos = json.loads((op.carpeta / "2026-03" / "registro.json").read_text(encoding="utf-8"))
+    assert datos["diferencias"] == []
+
+
+def test_revision_marca_archivo_que_falta_sin_volver_a_consultar(escenario, tmp_path):
+    from descargasri import verificacion
+    falso, op, rec, *_ = escenario
+    op.emitidos = op.anulados = False
+    _correr(tareas.descargar(op), falso, [])
+    rmes = almacen.RegistroMes(op.carpeta / "2026-03")
+    primero = sorted((op.carpeta / "2026-03" / "recibidos" / "facturas").iterdir())[0]
+    primero.unlink()
+    revisados, difs = verificacion.revisar_archivos(op.carpeta, rmes)
+    assert revisados == 53 and len(difs) == 1 and difs[0].problema == "no hay archivo en la carpeta"
+
+
+def test_lector_de_ride():
+    from descargasri import xmlinfo
+    i = xmlinfo.leer_ride(ride_pdf("1" * 49, "CLIENTE DE PRUEBA S.A."))
+    assert i.razon_receptor == "CLIENTE DE PRUEBA S.A." and i.id_receptor == "1700000003001"
+    assert i.total == "115.00"
+
+
+def test_dia_verificado_con_archivo_danado_se_repara(escenario):
+    falso, op, rec, emi_reciente, emi_viejo, ret = escenario
+    op.hoy = date(2026, 4, 30)
+    op.recibidos = op.anulados = False
+    _correr(tareas.descargar(op), falso, [])
+    pdf = op.carpeta / "2026-03" / "emitidos" / "facturas" / "2026-03-02 CLIENTE 000000455 Factura 001-002-000000455.pdf"
+    pdf.write_bytes(b"%PDF-1.4 roto")
+    # 2.ª vez: ese día ya no cuenta como verificado; se consulta, se aparta el dañado y se baja otra vez
+    p2 = PortalFalso({}, falso.emitidos, [])
+    r2 = _correr(tareas.descargar(op), p2, [])
+    assert r2.completo and p2.consultas == 1 and pdf.is_file()
+    assert (pdf.parent / (pdf.name + ".dañado")).is_file()

@@ -61,3 +61,34 @@ def respuesta_soap(cl: str, comprobante: str | None, estado="AUTORIZADO", mensaj
         f"<RespuestaAutorizacionComprobante><claveAccesoConsultada>{cl}</claveAccesoConsultada>{cuerpo}"
         "</RespuestaAutorizacionComprobante></ns2:autorizacionComprobanteResponse></soap:Body></soap:Envelope>"
     ).encode("utf-8")
+
+
+def pdf_con_texto(*lineas: str) -> bytes:
+    """PDF mínimo y válido con líneas de texto (para simular el RIDE)."""
+    flujo = "BT /F1 9 Tf 40 800 Td " + " ".join(
+        f"({l.replace('(', '[').replace(')', ']')}) Tj 0 -14 Td" for l in lineas) + " ET"
+    objetos = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R "
+        "/Resources << /Font << /F1 5 0 R >> >> >>",
+        f"<< /Length {len(flujo)} >>\nstream\n{flujo}\nendstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    salida = b"%PDF-1.4\n"
+    pos = []
+    for i, o in enumerate(objetos, 1):
+        pos.append(len(salida))
+        salida += f"{i} 0 obj\n{o}\nendobj\n".encode("latin-1")
+    xref = len(salida)
+    salida += f"xref\n0 {len(objetos) + 1}\n0000000000 65535 f \n".encode()
+    for p in pos:
+        salida += f"{p:010d} 00000 n \n".encode()
+    salida += f"trailer\n<< /Size {len(objetos) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return salida
+
+
+def ride_pdf(clave: str, cliente: str, identificacion: str = "1700000003001") -> bytes:
+    return pdf_con_texto("FACTURA", "CLAVE DE ACCESO", clave, "Razon Social / Nombres y Apellidos:",
+                         "Identificacion", "Fecha Guia", cliente, identificacion, "02/03/2026",
+                         "115.00 VALOR TOTAL")

@@ -96,6 +96,7 @@ class RegistroMes:
         self.comprobacion: dict[str, dict] = {}
         # días de emitidos ya consultados y completos: "tipo|aaaa-mm-dd" -> cantidad en el SRI
         self.dias_verificados: dict[str, int] = {}
+        self.diferencias: list[dict] = []  # de la última revisión
         if self.ruta.is_file():
             try:
                 crudo = json.loads(self.ruta.read_text(encoding="utf-8"))
@@ -104,6 +105,7 @@ class RegistroMes:
                 self.anulados = crudo.get("anulados", {})
                 self.comprobacion = crudo.get("comprobacion", {})
                 self.dias_verificados = crudo.get("dias_verificados", {})
+                self.diferencias = crudo.get("diferencias", [])
             except (ValueError, TypeError, KeyError):
                 pass
 
@@ -142,6 +144,7 @@ class RegistroMes:
             "anulados": dict(sorted(self.anulados.items())),
             "comprobacion": self.comprobacion,
             "dias_verificados": dict(sorted(self.dias_verificados.items())),
+            "diferencias": self.diferencias,
         }
         tmp = self.ruta.with_suffix(".tmp")
         tmp.write_text(json.dumps(crudo, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -229,6 +232,12 @@ def escribir_indice(reg: RegistroMes, anio: int, mes: int) -> Path:
             c.fill = verde if v.get("completo") else rojo
     for col, ancho in zip("ABCDEFG", (12, 28, 14, 10, 14, 24, 12)):
         comp.column_dimensions[col].width = ancho
+
+    hoja("Diferencias", ["Fuente", "Sección", "Tipo", "Serie", "Fecha emisión", "Proveedor / cliente",
+                         "Problema", "Clave de acceso"],
+         [[d.get("fuente", ""), d.get("seccion", "").capitalize(), d.get("tipo", ""), d.get("serie", ""),
+           d.get("fecha", ""), d.get("contraparte", ""), d.get("problema", ""), d.get("clave", "")]
+          for d in reg.diferencias] or [["", "", "", "", "", "", "Sin diferencias: todo coincide", ""]])
 
     resumen = wb.create_sheet("Resumen", 0)
     resumen.append(["Periodo", f"{anio:04d}-{mes:02d}"])
