@@ -81,8 +81,17 @@ class Asistente(QDialog):
         caja = QFrame()
         caja.setObjectName("caja")
         cl = QVBoxLayout(caja)
-        priv = QLabel("🔒 <b>Tu clave del SRI no se guarda.</b> La escribes cada vez; se usa solo para entrar "
-                      "y se borra al terminar la descarga. No se envía a ningún otro lugar que no sea el SRI.")
+        priv = QLabel(
+            "🔒 <b>Tu clave del SRI</b><br>"
+            "• Puedes escribirla cada vez, o marcar <b>«Guardar la clave en este equipo»</b> para no "
+            "tener que recordarla.<br>"
+            "• Si la guardas, queda <b>cifrada en el llavero del sistema</b> (Llavero de GNOME en Linux, "
+            "Administrador de credenciales en Windows), nunca en archivos de la aplicación, y solo "
+            "después de que el SRI la acepte.<br>"
+            "• Si no la guardas, se borra al terminar la descarga.<br>"
+            "• Solo se envía al SRI. Puedes borrarla cuando quieras con el botón <b>«Olvidar»</b>.<br><br>"
+            "<i>Si la guardas, cualquier persona que use tu sesión de este computador podrá descargar y "
+            "ver la clave: protege el computador con contraseña.</i>")
         priv.setWordWrap(True)
         priv.setTextFormat(Qt.RichText)
         cl.addWidget(priv)
@@ -93,8 +102,9 @@ class Asistente(QDialog):
     def _navegador(self) -> QWidget:
         w, l = self._pagina("Navegador para el SRI")
         exp = QLabel("El SRI solo deja consultar los comprobantes recibidos desde un navegador normal. "
-                     "La aplicación abre uno <b>en segundo plano, con un perfil propio</b>: no toca tus "
-                     "marcadores, contraseñas ni sesiones, y solo lo verás si el SRI pide algo.")
+                     "La aplicación abre uno <b>minimizado y con un perfil propio</b>: no toca tus "
+                     "marcadores, contraseñas ni sesiones, y se muestra solo si el SRI pide algo. "
+                     "Puedes verlo cuando quieras con el botón «Ver navegador».")
         exp.setWordWrap(True)
         exp.setTextFormat(Qt.RichText)
         l.addWidget(exp)
@@ -118,8 +128,7 @@ class Asistente(QDialog):
         self.grupo_modo = QButtonGroup(self)
         actual = str(self.ajustes.value("modo_navegador", "minimizado") or "minimizado")
         for valor, texto in (
-                ("minimizado", "Minimizado (recomendado): queda en la barra de tareas sin taparte; "
-                               "se muestra solo si el SRI pide algo."),
+                ("minimizado", "Minimizado (recomendado): en la barra de tareas, sin taparte."),
                 ("visible", "Visible: ver lo que hace la app en el SRI.")):
             r = QRadioButton(texto)
             r.setProperty("modo", valor)

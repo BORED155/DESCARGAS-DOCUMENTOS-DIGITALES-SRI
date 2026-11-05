@@ -4,8 +4,10 @@ Descarga masiva de comprobantes electrónicos del portal **SRI en línea** (Ecua
 Aplicación de escritorio en Python + PySide6 (Linux y Windows).
 
 ## Cómo se usa
-1. Escribe el **RUC o cédula**, la **C.I. adicional** (solo si eres usuario adicional) y la
-   **clave del SRI**. La clave no se guarda: se usa para entrar y se borra del formulario.
+1. Elige la empresa de la lista o escribe el **RUC o cédula**, la **C.I. adicional** (solo si
+   eres usuario adicional) y la **clave del SRI**. Con «Guardar la clave en este equipo» la clave
+   queda cifrada en el llavero del sistema (keyring), solo después de que el SRI la acepte; si no,
+   se borra al terminar. «Olvidar» la quita.
 2. Elige **mes y año**, qué descargar y los tipos de comprobante, y pulsa **Descargar**.
 3. La app abre Brave (o Chrome) minimizado con un perfil propio (gestor de contraseñas
    desactivado), entra al SRI y descarga. Si ya hay una sesión de ese RUC la reutiliza; si es
@@ -30,8 +32,8 @@ esté abierta.
 ## Carpetas
 ```
 <carpeta>/<RUC> - <RAZÓN SOCIAL>/<AAAA-MM>/
-    recibidos/<tipo>/<clave>.xml
-    emitidos/<tipo>/<clave>.xml | .pdf
+    recibidos/<tipo>/AAAA-MM-DD PROVEEDOR Tipo 001-001-000000123.xml
+    emitidos/<tipo>/AAAA-MM-DD CLIENTE Tipo 001-001-000000123.xml | .pdf
     registro.json
     indice AAAA-MM.xlsx
 ```
