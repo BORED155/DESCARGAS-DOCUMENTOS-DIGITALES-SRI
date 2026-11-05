@@ -692,3 +692,28 @@ def test_modo_oculto_rechazado_reabre_visible_y_sigue(escenario):
     assert reaperturas == [1] and p.reingresos == 1
     assert res.completo and res.xml_portal == 53
     assert capt == []  # no hizo falta pedir nada al usuario
+
+
+def test_solo_pdf(escenario):
+    falso, op, rec, emi_reciente, emi_viejo, ret = escenario
+    op.solo_pdf = True
+    op.anulados = False
+    avisos: list = []
+    res = _correr(tareas.descargar(op), falso, avisos)
+    mes = op.carpeta / "2026-03"
+    assert res.completo
+    assert len(list((mes / "recibidos" / "facturas").glob("*.pdf"))) == 53
+    assert not list(mes.rglob("*.xml"))           # ningún XML
+    assert res.xml_servicio == 0 and res.xml_portal == 0
+    assert (mes / "emitidos" / "facturas" / "2026-03-02 CLIENTE 000000454 Factura 001-002-000000454.pdf").is_file()
+
+
+def test_solo_pdf_despues_de_xml_baja_los_pdf_que_faltan(escenario):
+    falso, op, rec, *_ = escenario
+    op.emitidos = op.anulados = False
+    _correr(tareas.descargar(op), falso, [])            # primero XML
+    op.solo_pdf = True
+    res = _correr(tareas.descargar(op), PortalFalso(falso.recibidos, {}, []), [])
+    carpeta = op.carpeta / "2026-03" / "recibidos" / "facturas"
+    assert res.completo and res.pdf == 53
+    assert len(list(carpeta.glob("*.xml"))) == 53 and len(list(carpeta.glob("*.pdf"))) == 53

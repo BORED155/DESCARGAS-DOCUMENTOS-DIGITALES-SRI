@@ -191,8 +191,8 @@ class Ventana(QMainWindow):
 
         g = QGroupBox("Qué descargar")
         gl = QGridLayout(g)
-        self.chk_rec = QCheckBox("Recibidos (compras) – XML")
-        self.chk_emi = QCheckBox("Emitidos (ventas y retenciones) – XML o PDF")
+        self.chk_rec = QCheckBox("Recibidos (compras)")
+        self.chk_emi = QCheckBox("Emitidos (ventas y retenciones hechas)")
         self.chk_anu = QCheckBox("Anulados – lista")
         for i, c in enumerate((self.chk_rec, self.chk_emi, self.chk_anu)):
             c.setChecked(self.ajustes.value(f"sec{i}", "true") == "true")
@@ -210,9 +210,17 @@ class Ventana(QMainWindow):
         self.chk_revisar = QCheckBox("Volver a revisar todo en el SRI (más lento)")
         self.chk_revisar.setToolTip("Consulta otra vez los días de emitidos que ya se verificaron completos")
         gl.addWidget(self.chk_revisar, 4, 0, 1, 2)
-        self.chk_pdf = QCheckBox("Guardar también el PDF (RIDE) de todo")
-        self.chk_pdf.setChecked(self.ajustes.value("pdf", "false") == "true")
-        gl.addWidget(self.chk_pdf, 3, 0, 1, 2)
+        fila_formato = QHBoxLayout()
+        fila_formato.addWidget(QLabel("Formato:"))
+        self.cmb_formato = QComboBox()
+        self.cmb_formato.addItem("XML (o PDF si el SRI no da el XML)", "xml")
+        self.cmb_formato.addItem("Solo PDF (RIDE), para imprimir", "pdf")
+        self.cmb_formato.addItem("XML y PDF", "ambos")
+        guardado = str(self.ajustes.value("formato", "") or ("ambos" if self.ajustes.value("pdf", "false") == "true"
+                                                             else "xml"))
+        self.cmb_formato.setCurrentIndex(max(0, self.cmb_formato.findData(guardado)))
+        fila_formato.addWidget(self.cmb_formato, 1)
+        gl.addLayout(fila_formato, 3, 0, 1, 2)
         lay.addWidget(g)
 
         lay.addStretch(1)
@@ -511,7 +519,7 @@ class Ventana(QMainWindow):
             a.setValue(f"sec{i}", "true" if c.isChecked() else "false")
         for cod, c in self.chk_tipos.items():
             a.setValue(f"tipo{cod}", "true" if c.isChecked() else "false")
-        a.setValue("pdf", "true" if self.chk_pdf.isChecked() else "false")
+        a.setValue("formato", self.cmb_formato.currentData())
         a.setValue("carpeta", self.carpeta.text())
 
     def _descargar(self):
@@ -557,7 +565,8 @@ class Ventana(QMainWindow):
             anulados=self.chk_anu.isChecked(),
             tipos_recibidos=[t for t in tipos if t in portal.TIPOS_RECIBIDOS],
             tipos_emitidos=[t for t in tipos if t in portal.TIPOS_EMITIDOS],
-            con_pdf=self.chk_pdf.isChecked(),
+            con_pdf=self.cmb_formato.currentData() == "ambos",
+            solo_pdf=self.cmb_formato.currentData() == "pdf",
             revisar_todo=self.chk_revisar.isChecked(),
         )
         self.registro.clear()

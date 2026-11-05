@@ -123,7 +123,8 @@ class Opciones:
     anulados: bool = True
     tipos_recibidos: list[str] = field(default_factory=lambda: list(portal.TIPOS_RECIBIDOS))
     tipos_emitidos: list[str] = field(default_factory=lambda: ["1", "2", "3", "4", "6"])
-    con_pdf: bool = False
+    con_pdf: bool = False   # además del XML, el PDF (RIDE)
+    solo_pdf: bool = False  # solo el PDF (RIDE), por ejemplo para imprimir
     pausa_ms: tuple[int, int] = (400, 1000)
     hoy: date = field(default_factory=date.today)
     reparados: list = field(default_factory=list, repr=False)  # archivos dañados que se volvieron a bajar
@@ -564,52 +565,71 @@ def sin_resultados(e: dict) -> bool:
 # --- Recibidos ----------------------------------------------------------------
 
 def procesar_recibidos(op: Opciones, regs: Registros, res: Resumen, cols: list[str], filas: list[dict]) -> Tarea:
-    """Baja el XML de cada fila visible. Devuelve cuántas quedaron con archivo."""
+    """Baja el XML y/o el PDF de cada fila visible, según el formato elegido.
+
+    Devuelve cuántas filas quedaron con los archivos pedidos."""
     pos = columnas(cols)
+    quiere_xml = not op.solo_pdf
+    quiere_pdf = op.con_pdf or op.solo_pdf
     seguidos = 0
     guardados = 0
     for f in filas:
         clave, reg = fila_a_registro("recibidos", pos, f.get("celdas", []))
         if not clave:
             continue
-        ruta_xml = existente(op, regs, "recibidos", clave, ".xml", reg.razon_contraparte)
-        if ruta_xml:
-            res.existentes += 1
-            reg.origen, reg.estado = "XML del portal", "Ya existía"
-            completar_con_xml(reg, ruta_xml.read_bytes())
-        elif f.get("xml"):
-            status, tipo, cont = yield from bajar_link(f["xml"], "x" + clave.texto[-12:])
-            if xmlinfo.es_autorizacion(cont):
-                completar_con_xml(reg, cont)
-                ruta_xml = almacen.ruta_legible(op.carpeta, "recibidos", clave, reg.razon_contraparte, ".xml")
-                almacen.guardar_archivo(ruta_xml, cont)
-                reg.origen, reg.estado = "XML del portal", "Descargado"
-                res.nuevos += 1
-                res.xml_portal += 1
-                seguidos = 0
-            else:
-                reg.estado = f"Error: el portal no entregó el XML (HTTP {status}, {tipo.split(';')[0]})"
-                res.errores += 1
-                seguidos += 1
-            yield from pausa(op)
-        if ruta_xml and ruta_xml.is_file():
-            reg.archivos.append(_rel(op, ruta_xml))
-            guardados += 1
-        if op.con_pdf and f.get("pdf"):
+        ruta_xml = ruta_pdf = None
+        if quiere_xml:
+            ruta_xml = existente(op, regs, "recibidos", clave, ".xml", reg.razon_contraparte)
+            if ruta_xml:
+                res.existentes += 1
+                reg.origen, reg.estado = "XML del portal", "Ya existía"
+                completar_con_xml(reg, ruta_xml.read_bytes())
+            elif f.get("xml"):
+                status, tipo, cont = yield from bajar_link(f["xml"], "x" + clave.texto[-12:])
+                if xmlinfo.es_autorizacion(cont):
+                    completar_con_xml(reg, cont)
+                    ruta_xml = almacen.ruta_legible(op.carpeta, "recibidos", clave, reg.razon_contraparte, ".xml")
+                    almacen.guardar_archivo(ruta_xml, cont)
+                    reg.origen, reg.estado = "XML del portal", "Descargado"
+                    res.nuevos += 1
+                    res.xml_portal += 1
+                    seguidos = 0
+                else:
+                    reg.estado = f"Error: el portal no entregó el XML (HTTP {status}, {tipo.split(';')[0]})"
+                    res.errores += 1
+                    seguidos += 1
+                yield from pausa(op)
+        if quiere_pdf:
             ruta_pdf = existente(op, regs, "recibidos", clave, ".pdf", reg.razon_contraparte)
-            if not ruta_pdf:
-                _, _, cont = yield from bajar_link(f["pdf"], "p" + clave.texto[-12:])
+            if ruta_pdf:
+                if not quiere_xml:
+                    res.existentes += 1
+                    reg.origen, reg.estado = "PDF RIDE", "Ya existía"
+            elif f.get("pdf"):
+                status, tipo, cont = yield from bajar_link(f["pdf"], "p" + clave.texto[-12:])
                 if cont.startswith(b"%PDF"):
                     ruta_pdf = almacen.ruta_legible(op.carpeta, "recibidos", clave, reg.razon_contraparte, ".pdf")
                     almacen.guardar_archivo(ruta_pdf, cont)
                     res.pdf += 1
+                    if not quiere_xml:
+                        res.nuevos += 1
+                        reg.origen, reg.estado = "PDF RIDE", "Descargado"
+                    seguidos = 0
+                else:
+                    reg.estado = f"Error: el portal no entregó el PDF (HTTP {status})"
+                    res.errores += 1
+                    seguidos += 1
                 yield from pausa(op)
-            if ruta_pdf and ruta_pdf.is_file():
-                reg.archivos.append(_rel(op, ruta_pdf))
+        for r in (ruta_xml, ruta_pdf):
+            if r and r.is_file():
+                reg.archivos.append(_rel(op, r))
+        if (not quiere_xml or (ruta_xml and ruta_xml.is_file())) and \
+                (not quiere_pdf or (ruta_pdf and ruta_pdf.is_file())):
+            guardados += 1
         regs.de(clave.fecha.year, clave.fecha.month).poner(reg)
         if seguidos >= 3:
             regs.guardar()
-            raise Falla("el portal dejó de entregar los XML (¿se cerró la sesión?).")
+            raise Falla("el portal dejó de entregar los archivos (¿se cerró la sesión?).")
     return guardados
 
 
@@ -752,7 +772,10 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
             continue
         ruta_xml = existente(op, regs, "emitidos", clave, ".xml")
         ruta_pdf = existente(op, regs, "emitidos", clave, ".pdf")
-        intentar_xml = not srv.caido and not (srv.sin_xml_hasta and clave.fecha <= srv.sin_xml_hasta)
+        intentar_xml = not op.solo_pdf and not srv.caido and \
+            not (srv.sin_xml_hasta and clave.fecha <= srv.sin_xml_hasta)
+        if op.solo_pdf:
+            ruta_xml = None  # en «solo PDF» no se usa el XML aunque exista
         if ruta_xml:
             res.existentes += 1
             reg.origen, reg.estado = "XML servicio web SRI", "Ya existía"
@@ -782,7 +805,7 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
                     reg.estado = f"Error: el portal no entregó el PDF (HTTP {status})"
                     res.errores += 1
             yield from pausa(op)
-        if op.con_pdf and not ruta_pdf and f.get("pdf"):
+        if (op.con_pdf or op.solo_pdf) and not ruta_pdf and f.get("pdf"):
             _, _, cont = yield from bajar_link(f["pdf"], "p" + clave.texto[-12:])
             if cont.startswith(b"%PDF"):
                 completar_con_pdf(reg, cont)
@@ -796,7 +819,13 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
             reg.archivos.append(_rel(op, ruta_pdf))
         if ruta_xml and ruta_xml.is_file():
             reg.archivos.append(_rel(op, ruta_xml))
-        if (ruta_xml and ruta_xml.is_file()) or (ruta_pdf and ruta_pdf.is_file()):
+        tiene_pdf = bool(ruta_pdf and ruta_pdf.is_file())
+        tiene_xml = bool(ruta_xml and ruta_xml.is_file())
+        if (op.con_pdf or op.solo_pdf):
+            completo = tiene_pdf  # se pidió el PDF (el XML, si el SRI lo da, es un extra)
+        else:
+            completo = tiene_xml or tiene_pdf
+        if completo:
             guardados += 1
         regs.de(clave.fecha.year, clave.fecha.month).poner(reg)
     return guardados
@@ -833,12 +862,13 @@ def dia_ya_verificado(op: Opciones, regs: Registros, d: date, tipo: str) -> int 
     if previo == 0:
         return 0
     cod = TIPO_PORTAL_A_CLAVE.get(tipo)
+    exige_pdf = op.solo_pdf or op.con_pdf
     presentes = 0
     for r in rmes.datos.values():
         c = leer_clave(r.clave)
         if r.seccion == "emitidos" and c and c.tipo == cod and c.fecha == d and \
-                any((op.carpeta / x).is_file() and verificacion.archivo_valido(op.carpeta / x, r.clave)
-                    for x in r.archivos):
+                any((op.carpeta / x).is_file() and (not exige_pdf or x.lower().endswith(".pdf"))
+                    and verificacion.archivo_valido(op.carpeta / x, r.clave) for x in r.archivos):
             presentes += 1
     return previo if presentes >= previo else None
 
