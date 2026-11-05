@@ -76,16 +76,22 @@ class Ventana(QMainWindow):
     def _configurar(self):
         from .asistente import Asistente
 
+        antes = self._modo_navegador()
         if Asistente(self.ajustes, self).exec():
             self.carpeta.setText(str(self.ajustes.value("carpeta")))
             self._mostrar_navegador()
+            if self._modo_navegador() != antes and self.nav.disponible() and not self.motor.ocupado:
+                self.nav.cerrar_navegador()  # se abrirá en el modo nuevo al descargar
+                self.empresa = None
+                self.lbl_empresa.setText("Empresa: sin sesión")
 
     def _mostrar_navegador(self):
         from ..navegador import nombre_navegador
 
         exe = str(self.ajustes.value("navegador", "") or "") or buscar_ejecutable()
         if exe and Path(exe).is_file() or (exe and not Path(exe).is_absolute()):
-            self.lbl_navegador.setText(f"Navegador: {nombre_navegador(exe)}")
+            modo = {"oculto": "oculto", "minimizado": "minimizado", "visible": "visible"}[self._modo_navegador()]
+            self.lbl_navegador.setText(f"Navegador: {nombre_navegador(exe)} ({modo})")
         else:
             self.lbl_navegador.setText("Navegador: ninguno — pulsa Configuración")
 
@@ -276,16 +282,24 @@ class Ventana(QMainWindow):
         exe = str(self.ajustes.value("navegador", "") or "") or None
         if exe and not Path(exe).is_file():
             exe = None
+        modo = self._modo_navegador()
         try:
-            self.nav.abrir(portal.INICIO, exe)
+            self.nav.abrir(portal.INICIO, exe, oculto=(modo == "oculto"))
         except NavegadorError as e:
             QMessageBox.warning(self, NOMBRE_APP, str(e))
             return False
         self._abierto_por_app = True
-        self.nav.minimizar()
-        self.raise_()
-        self.activateWindow()
+        self.motor.ocultar_navegador = modo != "visible"
+        if modo == "minimizado":
+            self.nav.minimizar()
+        if modo != "visible":
+            self.raise_()
+            self.activateWindow()
         return True
+
+    def _modo_navegador(self) -> str:
+        m = str(self.ajustes.value("modo_navegador", "oculto") or "oculto")
+        return m if m in ("oculto", "minimizado", "visible") else "oculto"
 
     # --- empresas guardadas -------------------------------------------------------
 
@@ -380,8 +394,30 @@ class Ventana(QMainWindow):
         self._cargar_empresas((usuario, ci))
 
     def _ver_navegador(self):
-        if self._asegurar_navegador():
+        if self.nav.disponible() and self.nav.es_oculto():
+            if QMessageBox.question(
+                    self, NOMBRE_APP,
+                    "El navegador está trabajando oculto. Para mostrarlo hay que volver a abrirlo y "
+                    "la sesión del SRI se cierra (al descargar, la app vuelve a entrar sola).\n\n¿Mostrarlo?") \
+                    != QMessageBox.Yes:
+                return
+            try:
+                self.nav.reabrir_visible(portal.INICIO)
+            except NavegadorError as e:
+                QMessageBox.warning(self, NOMBRE_APP, str(e))
+                return
+            self._abierto_por_app = True
             self.nav.mostrar()
+            return
+        if not self.nav.disponible():
+            exe = str(self.ajustes.value("navegador", "") or "") or None
+            try:
+                self.nav.abrir(portal.INICIO, exe if exe and Path(exe).is_file() else None, oculto=False)
+            except NavegadorError as e:
+                QMessageBox.warning(self, NOMBRE_APP, str(e))
+                return
+            self._abierto_por_app = True
+        self.nav.mostrar()
 
     def _cerrar_sesion(self):
         if self.motor.ocupado or not self.nav.disponible():

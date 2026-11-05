@@ -131,6 +131,7 @@ class Navegador:
         self._id_pestana: str | None = None
         self._n = 0
         self._candado = threading.RLock()
+        self.ejecutable: str | None = None
 
     # --- arranque --------------------------------------------------------
 
@@ -141,12 +142,23 @@ class Navegador:
         except Exception:
             return False
 
-    def abrir(self, url: str, ejecutable: str | None = None) -> str:
-        """Abre el navegador (o reutiliza el ya abierto) y devuelve su nombre."""
+    def es_oculto(self) -> bool:
+        """El navegador abierto corre sin ventana (modo headless)."""
+        try:
+            v = _json_http(f"http://127.0.0.1:{self.puerto}/json/version", 1.0)
+            return "headless" in (v.get("Browser", "") + v.get("User-Agent", "")).lower()
+        except Exception:
+            return False
+
+    def abrir(self, url: str, ejecutable: str | None = None, oculto: bool = False) -> str:
+        """Abre el navegador (o reutiliza el ya abierto) y devuelve su nombre.
+
+        oculto=True: sin ninguna ventana (headless). Si el SRI no lo acepta, la
+        aplicación lo vuelve a abrir visible (reabrir_visible)."""
         if self.disponible():
             self._asegurar_pestana(url)
             return "navegador ya abierto"
-        exe = ejecutable or buscar_ejecutable()
+        exe = ejecutable or self.ejecutable or buscar_ejecutable()
         if not exe:
             raise NavegadorError("No encontré Brave, Google Chrome ni Microsoft Edge instalados. "
                                  "Instala Brave (brave.com) o Google Chrome y vuelve a intentar.")
@@ -159,7 +171,8 @@ class Navegador:
                 # que la página siga trabajando aunque la ventana esté minimizada
                 "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
                 "--disable-backgrounding-occluded-windows",
-                "--window-size=1100,800", "--new-window", url]
+                "--window-size=1100,800"] + (["--headless=new"] if oculto else ["--new-window"]) + [url]
+        self.ejecutable = exe
         extra = {}
         if sys.platform.startswith("win"):
             extra["creationflags"] = 0x00000008  # DETACHED_PROCESS
@@ -320,3 +333,31 @@ class Navegador:
 
     def cerrar(self) -> None:
         self._cerrar_ws()
+
+    def cerrar_navegador(self) -> None:
+        """Cierra el navegador de la app (termina la sesión del SRI)."""
+        self._cerrar_ws()
+        try:
+            self._llamar_navegador("Browser.close", {})
+        except Exception:
+            pass
+        for _ in range(40):
+            if not self.disponible():
+                break
+            time.sleep(0.25)
+        if self.proceso and self.proceso.poll() is None:
+            try:
+                self.proceso.terminate()
+                self.proceso.wait(5)
+            except Exception:
+                pass
+        self._id_pestana = None
+
+    def reabrir_visible(self, url: str) -> bool:
+        """Si está oculto, lo cierra y lo abre con ventana. True si hubo que reabrirlo."""
+        if self.disponible() and not self.es_oculto():
+            return False
+        self.cerrar_navegador()
+        time.sleep(1.0)  # que el perfil quede libre
+        self.abrir(url, oculto=False)
+        return True

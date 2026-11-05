@@ -111,6 +111,21 @@ class Asistente(QDialog):
         fila.addWidget(b)
         fila.addStretch(1)
         l.addLayout(fila)
+
+        modo = QLabel("<b>¿Cómo trabaja el navegador?</b>")
+        modo.setTextFormat(Qt.RichText)
+        l.addWidget(modo)
+        self.grupo_modo = QButtonGroup(self)
+        actual = str(self.ajustes.value("modo_navegador", "oculto") or "oculto")
+        for valor, texto in (
+                ("oculto", "Oculto: sin ninguna ventana (recomendado). Si el SRI pide algo, se muestra solo."),
+                ("minimizado", "Minimizado: aparece en la barra de tareas, sin taparte."),
+                ("visible", "Visible: ver lo que hace la app en el SRI.")):
+            r = QRadioButton(texto)
+            r.setProperty("modo", valor)
+            r.setChecked(valor == actual)
+            self.grupo_modo.addButton(r)
+            l.addWidget(r)
         l.addStretch(1)
         self._manual: str | None = None
         self._llenar_navegadores()
@@ -212,6 +227,8 @@ class Asistente(QDialog):
             return
         b = self.grupo_nav.checkedButton()
         self.ajustes.setValue("navegador", b.property("ruta") if b else "")
+        m = self.grupo_modo.checkedButton()
+        self.ajustes.setValue("modo_navegador", m.property("modo") if m else "oculto")
         self.ajustes.setValue("carpeta", self.carpeta.text().strip() or carpeta_por_defecto())
         self.ajustes.setValue("configurado", "si")
         self.accept()

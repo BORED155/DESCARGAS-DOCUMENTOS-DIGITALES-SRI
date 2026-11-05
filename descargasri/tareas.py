@@ -76,6 +76,12 @@ class IngresoCorrecto:
 
 
 @dataclass
+class MostrarNavegador:
+    """Pide el navegador con ventana. Devuelve True si estaba oculto y hubo que reabrirlo
+    (en ese caso la sesión del SRI se perdió y hay que volver a entrar)."""
+
+
+@dataclass
 class BorrarSesion:
     """Cierra la sesión del SRI en el navegador (borra sus cookies)."""
 
@@ -616,17 +622,38 @@ def consultar_recibidos_verificado(op: Opciones, mes: int, tipo: str, reintentos
     """Consulta recibidos. Si el SRI rechaza el reCAPTCHA invisible («Captcha incorrecta»),
     reintenta y, si sigue, pide al usuario que pulse «Consultar» en la ventana del SRI."""
     sufijo = "tablaCompRecibidos"
-    for intento in range(reintentos + 1):
-        r = yield Js(portal.consultar_recibidos(op.anio, mes, tipo))
-        if not r or not r.get("ok"):
-            e = (r or {}).get("e", "No se pudo consultar recibidos")
-            raise (FallaFatal if "no permite" in e else Falla)(e)
-        e = yield from esperar_consulta(sufijo, entera=True)
-        if not _captcha_rechazado(e):
+
+    def intentar() -> Tarea:
+        for intento in range(reintentos + 1):
+            r = yield Js(portal.consultar_recibidos(op.anio, mes, tipo))
+            if not r or not r.get("ok"):
+                e = (r or {}).get("e", "No se pudo consultar recibidos")
+                raise (FallaFatal if "no permite" in e else Falla)(e)
+            e = yield from esperar_consulta(sufijo, entera=True)
+            if not _captcha_rechazado(e):
+                return e
+            if intento < reintentos:
+                yield Aviso(f"El SRI respondió «{e['mensajes']}»; reintento en {espera_reintento_ms // 1000} s.",
+                            "alerta")
+                yield Esperar(espera_reintento_ms)
+        return None
+
+    e = yield from intentar()
+    if e is not None:
+        return e
+    # Con el navegador oculto el SRI puede no aceptar la verificación: se abre con ventana.
+    if (yield MostrarNavegador()):
+        yield Aviso("Sin ventana el SRI no aceptó la verificación; se abrió el navegador visible "
+                    "y se vuelve a entrar.", "alerta")
+        if op.cred is not None and op.cred.clave:
+            yield from iniciar_sesion(op.cred, silencioso=True)
+        else:
+            raise FallaFatal("Se reabrió el navegador y hay que entrar de nuevo: escribe la clave y pulsa "
+                             "Descargar (solo bajará lo que falta).")
+        yield from abrir_recibidos()
+        e = yield from intentar()
+        if e is not None:
             return e
-        if intento < reintentos:
-            yield Aviso(f"El SRI respondió «{e['mensajes']}»; reintento en {espera_reintento_ms // 1000} s.", "alerta")
-            yield Esperar(espera_reintento_ms)
     # Lo resuelve el usuario: los filtros ya están puestos en la página.
     yield Js(portal.js("D.marcar(); return true;"))
     yield Captcha(True)

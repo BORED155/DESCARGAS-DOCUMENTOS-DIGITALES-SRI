@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from . import portal
 from .navegador import Navegador, NavegadorError
 from .tareas import (Aviso, BorrarSesion, Cancelado, Captcha, Esperar, Falla, IngresoCorrecto, Js,
-                     JsAsync, Navegar, Progreso, Python, Tarea)
+                     JsAsync, MostrarNavegador, Navegar, Progreso, Python, Tarea)
 
 
 class _Hilo(QThread):
@@ -101,6 +101,12 @@ class Motor(QObject):
         if isinstance(orden, IngresoCorrecto):
             self.ingreso.emit(orden.ruc, orden.razon)
             return None
+        if isinstance(orden, MostrarNavegador):
+            reabierto = self.nav.reabrir_visible(portal.INICIO)
+            self.nav.mostrar()
+            if reabierto:
+                self.aviso.emit("Se abrió el navegador con ventana.", "info")
+            return reabierto
         if isinstance(orden, BorrarSesion):
             self.nav.borrar_cookies()
             return None

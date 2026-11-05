@@ -656,3 +656,39 @@ def test_recordatorio_de_repaso(escenario):
     avisos2: list = []
     _correr(tareas.descargar(op), PortalFalso(falso.recibidos, {}, []), avisos2)
     assert not any(a.startswith("Recordatorio") for a in avisos2)
+
+
+def test_modo_oculto_rechazado_reabre_visible_y_sigue(escenario):
+    falso, op, rec, *_ = escenario
+    op.emitidos = op.anulados = False
+    p = PortalQueFalla(falso.recibidos, {}, [])
+    p.rechazos = 3  # la consulta y sus 2 reintentos sin ventana son rechazados
+    avisos: list = []
+    capt: list = []
+    reaperturas = []
+    gen = tareas.descargar(op, tareas.Credenciales(RUC_EMPRESA, "clave-de-prueba"))
+    valor = None
+    while True:
+        try:
+            orden = gen.send(valor)
+        except StopIteration as fin:
+            res = fin.value
+            break
+        valor = None
+        if isinstance(orden, tareas.Js):
+            valor = json.loads(json.dumps(p.js(orden.codigo)))
+        elif isinstance(orden, tareas.JsAsync):
+            valor = p.bajar(orden.codigo)
+        elif isinstance(orden, tareas.Navegar):
+            p.navegar(orden.url)
+        elif isinstance(orden, tareas.MostrarNavegador):
+            reaperturas.append(1)
+            p.sesion = False  # reabrir el navegador pierde la sesión
+            valor = True
+        elif isinstance(orden, tareas.Aviso):
+            avisos.append(orden.texto)
+        elif isinstance(orden, tareas.Captcha):
+            capt.append(orden.visible)
+    assert reaperturas == [1] and p.reingresos == 1
+    assert res.completo and res.xml_portal == 53
+    assert capt == []  # no hizo falta pedir nada al usuario
