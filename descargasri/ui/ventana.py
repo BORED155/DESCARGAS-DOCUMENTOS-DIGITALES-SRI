@@ -59,7 +59,7 @@ class Ventana(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(panel)
         self.setCentralWidget(scroll)
-        self.resize(520, 900)
+        self.resize(1080, 700)
         self.setStyleSheet(ESTILO_BOTONES)
 
         self._reloj = QTimer(self)
@@ -98,9 +98,18 @@ class Ventana(QMainWindow):
     # --- panel ---------------------------------------------------------------
 
     def _panel(self) -> QWidget:
+        """Dos columnas: a la izquierda qué y cómo bajar; a la derecha destino, avance y registro."""
         p = QWidget()
-        p.setMinimumWidth(420)
-        lay = QVBoxLayout(p)
+        columnas = QHBoxLayout(p)
+        izquierda = QWidget()
+        izquierda.setMinimumWidth(430)
+        izquierda.setMaximumWidth(560)
+        derecha = QWidget()
+        derecha.setMinimumWidth(420)
+        columnas.addWidget(izquierda, 0)
+        columnas.addWidget(derecha, 1)
+        lay = QVBoxLayout(izquierda)
+        lay.setContentsMargins(0, 0, 6, 0)
 
         g = QGroupBox("Ingreso al SRI en línea")
         gl = QGridLayout(g)
@@ -194,6 +203,10 @@ class Ventana(QMainWindow):
         self.chk_pdf.setChecked(self.ajustes.value("pdf", "false") == "true")
         gl.addWidget(self.chk_pdf, 3, 0, 1, 2)
         lay.addWidget(g)
+
+        lay.addStretch(1)
+        lay = QVBoxLayout(derecha)
+        lay.setContentsMargins(6, 0, 0, 0)
 
         g = QGroupBox("Carpeta de destino")
         gl = QHBoxLayout(g)
