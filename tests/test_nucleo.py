@@ -643,3 +643,16 @@ def test_dia_verificado_con_archivo_danado_se_repara(escenario):
     r2 = _correr(tareas.descargar(op), p2, [])
     assert r2.completo and p2.consultas == 1 and pdf.is_file()
     assert (pdf.parent / (pdf.name + ".dañado")).is_file()
+
+
+def test_recordatorio_de_repaso(escenario):
+    falso, op, *_ = escenario
+    op.emitidos = op.anulados = False
+    op.hoy = date(2026, 4, 5)
+    avisos: list = []
+    _correr(tareas.descargar(op), falso, avisos)
+    assert any("vuelve a pulsar Descargar desde el 11/04/2026" in a for a in avisos)
+    op.hoy = date(2026, 4, 20)
+    avisos2: list = []
+    _correr(tareas.descargar(op), PortalFalso(falso.recibidos, {}, []), avisos2)
+    assert not any(a.startswith("Recordatorio") for a in avisos2)

@@ -12,7 +12,7 @@ import calendar
 import math
 import random
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable, Generator
 
@@ -465,6 +465,7 @@ class FallaFatal(Falla):
 
 
 NO_HAY_DATOS = "no existen datos"
+DIAS_REPASO = 10  # días después del cierre del mes en que conviene volver a revisar
 
 
 def asegurar_sesion(op: Opciones) -> Tarea:
@@ -1018,6 +1019,14 @@ def comprobacion(res: Resumen, regs: Registros, op: Opciones) -> Tarea:
             yield Aviso(f"… y {len(difs) - 15} más: ver la hoja «Diferencias» del Excel índice.", "error")
         if difs:
             todo_bien = False
+        # Facturas autorizadas tarde: recordar volver a revisar pasado el cierre del mes
+        fin = date(op.anio, mes, calendar.monthrange(op.anio, mes)[1])
+        repaso = fin + timedelta(days=DIAS_REPASO)
+        rmes.comprobacion["_revisado"] = {"fecha": op.hoy.isoformat()}
+        if op.hoy <= repaso:
+            yield Aviso(f"Recordatorio: {mes:02d}/{op.anio} se revisó el {op.hoy:%d/%m/%Y}. Algunos proveedores "
+                        f"autorizan con días de atraso; vuelve a pulsar Descargar desde el "
+                        f"{repaso + timedelta(days=1):%d/%m/%Y} (solo bajará lo nuevo).", "alerta")
     return todo_bien
 
 

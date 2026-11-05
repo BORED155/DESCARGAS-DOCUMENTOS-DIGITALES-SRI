@@ -225,6 +225,8 @@ def escribir_indice(reg: RegistroMes, anio: int, mes: int) -> Path:
         c.fill = fondo
     verde = PatternFill("solid", fgColor="D4EDDA")
     for k, v in reg.comprobacion.items():
+        if "|" not in k:
+            continue
         sec, tipo = k.split("|", 1)
         comp.append([sec.capitalize(), tipo, v.get("sri", 0), v.get("leidos", 0), v.get("guardados", 0),
                      ", ".join(v.get("fallidos", [])), "Completo" if v.get("completo") else "INCOMPLETO"])
@@ -258,6 +260,9 @@ def escribir_indice(reg: RegistroMes, anio: int, mes: int) -> Path:
         resumen.append([s.capitalize(), t, n, round(tot, 2)])
     resumen.append([])
     resumen.append(["Anulados (no sumados)", "", len(reg.anulados)])
+    revisado = (reg.comprobacion.get("_revisado") or {}).get("fecha", "")
+    if revisado:
+        resumen.append(["Última revisión con el SRI", revisado])
     for col, ancho in zip("ABCD", (22, 30, 10, 14)):
         resumen.column_dimensions[col].width = ancho
 
