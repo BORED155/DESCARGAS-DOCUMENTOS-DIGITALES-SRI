@@ -63,8 +63,12 @@ class Ventana(QMainWindow):
         self._reloj.timeout.connect(self._detectar_empresa)
         self._reloj.start(3000)
         self._actualizar_botones()
-        if not buscar_ejecutable():
-            self._log("No encontré Brave ni Google Chrome: la app necesita uno de los dos instalado.", "error")
+        exe = buscar_ejecutable()
+        if exe:
+            from ..navegador import nombre_navegador
+            self._log(f"Navegador para el SRI: {nombre_navegador(exe)}", "info")
+        if not exe:
+            self._log("No encontré Brave, Chrome ni Edge: la app necesita uno de ellos instalado.", "error")
 
     # --- panel ---------------------------------------------------------------
 

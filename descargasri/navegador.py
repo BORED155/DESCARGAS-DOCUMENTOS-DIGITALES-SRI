@@ -42,12 +42,17 @@ def candidatos() -> list[str]:
                 str(Path(base) / "BraveSoftware/Brave-Browser/Application/brave.exe"),
                 str(Path(base) / "Google/Chrome/Application/chrome.exe"),
             ]
+        # Edge viene con Windows 10/11: queda como último recurso
+        for base in (os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                     os.environ.get("PROGRAMFILES", r"C:\Program Files")):
+            rutas.append(str(Path(base) / "Microsoft/Edge/Application/msedge.exe"))
         return rutas
     if sys.platform == "darwin":
         return ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
     return ["brave-browser", "brave", "brave-browser-stable", "google-chrome", "google-chrome-stable",
-            "chromium", "chromium-browser"]
+            "chromium", "chromium-browser", "microsoft-edge", "microsoft-edge-stable"]
 
 
 def buscar_ejecutable() -> str | None:
@@ -63,7 +68,8 @@ def buscar_ejecutable() -> str | None:
 
 
 def nombre_navegador(ruta: str) -> str:
-    return "Brave" if "brave" in ruta.lower() else "Chrome" if "chrome" in ruta.lower() else "Chromium"
+    r = ruta.lower()
+    return ("Brave" if "brave" in r else "Edge" if "edge" in r else "Chrome" if "chrome" in r else "Chromium")
 
 
 def _json_http(url: str, timeout: float = 2.0, metodo: str = "GET"):
@@ -126,7 +132,8 @@ class Navegador:
             return "navegador ya abierto"
         exe = ejecutable or buscar_ejecutable()
         if not exe:
-            raise NavegadorError("No encontré Brave ni Google Chrome instalados.")
+            raise NavegadorError("No encontré Brave, Google Chrome ni Microsoft Edge instalados. "
+                                 "Instala Brave (brave.com) o Google Chrome y vuelve a intentar.")
         if not _puerto_libre(self.puerto):
             raise NavegadorError(f"El puerto {self.puerto} está ocupado por otro programa.")
         self.perfil.mkdir(parents=True, exist_ok=True)
