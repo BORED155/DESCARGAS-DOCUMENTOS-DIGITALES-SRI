@@ -580,3 +580,12 @@ def test_nombre_archivo_legible():
     c = leer_clave(clave(date(2026, 3, 31), "07", RUC_PROVEEDOR, "001", "102", 17002))
     assert almacen.nombre_archivo(c, 'SUPER/LIQUORS: "S.A."', ".xml") == \
         "2026-03-31 SUPER LIQUORS S.A. Retención 001-102-000017002.xml"
+
+
+def test_clave_nueva_se_comprueba_aunque_haya_sesion():
+    f = LoginFalso(RUC_EMPRESA)
+    emp = correr_login(f, tareas.Credenciales(RUC_EMPRESA, "buena", verificar=True))
+    assert f.borrados == 1 and f.ingresos == [RUC_EMPRESA] and emp["ruc"] == RUC_EMPRESA
+    f2 = LoginFalso(RUC_EMPRESA)
+    with pytest.raises(tareas.Falla, match="no aceptó"):
+        correr_login(f2, tareas.Credenciales(RUC_EMPRESA, "mala", verificar=True))

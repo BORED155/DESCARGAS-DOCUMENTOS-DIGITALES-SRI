@@ -9,8 +9,8 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from . import portal
 from .navegador import Navegador, NavegadorError
-from .tareas import (Aviso, BorrarSesion, Cancelado, Captcha, Esperar, Falla, Js, JsAsync, Navegar,
-                     Progreso, Python, Tarea)
+from .tareas import (Aviso, BorrarSesion, Cancelado, Captcha, Esperar, Falla, IngresoCorrecto, Js,
+                     JsAsync, Navegar, Progreso, Python, Tarea)
 
 
 class _Hilo(QThread):
@@ -28,6 +28,7 @@ class Motor(QObject):
     progreso = Signal(int, int, str)
     captcha = Signal(bool)
     terminado = Signal(bool, str)  # ok, mensaje
+    ingreso = Signal(str, str)     # ruc, razón social: el SRI aceptó la clave
 
     def __init__(self, navegador: Navegador, parent=None):
         super().__init__(parent)
@@ -96,6 +97,9 @@ class Motor(QObject):
                 self.nav.mostrar()
             elif self.ocultar_navegador:
                 self.nav.minimizar()
+            return None
+        if isinstance(orden, IngresoCorrecto):
+            self.ingreso.emit(orden.ruc, orden.razon)
             return None
         if isinstance(orden, BorrarSesion):
             self.nav.borrar_cookies()

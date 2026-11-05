@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout, Q
 from .. import __version__, portal
 from ..motor import Motor
 from ..navegador import Navegador, NavegadorError, buscar_ejecutable
+from .. import credenciales
 from ..tareas import Credenciales, Opciones, descargar
 
 NOMBRE_APP = "Descargas Documentos Digitales SRI"
@@ -50,6 +51,8 @@ class Ventana(QMainWindow):
         self.motor.progreso.connect(self._progreso)
         self.motor.captcha.connect(self._captcha)
         self.motor.terminado.connect(self._terminado)
+        self.motor.ingreso.connect(self._ingreso_correcto)
+        self._pendiente: tuple[str, str, str] | None = None
 
         panel = self._panel()
         scroll = QScrollArea()
@@ -95,31 +98,48 @@ class Ventana(QMainWindow):
 
         g = QGroupBox("Ingreso al SRI en línea")
         gl = QGridLayout(g)
-        self.usuario = QLineEdit(str(self.ajustes.value("usuario", "")))
+        self.cmb_empresas = QComboBox()
+        self.cmb_empresas.setToolTip("Empresas con las que ya entraste en este equipo")
+        self.cmb_empresas.activated.connect(self._elegir_empresa)
+        self.btn_olvidar = QPushButton("Olvidar")
+        self.btn_olvidar.setToolTip("Quitar esta empresa de la lista y borrar su clave guardada")
+        self.btn_olvidar.clicked.connect(self._olvidar_empresa)
+        self.usuario = QLineEdit()
         self.usuario.setPlaceholderText("RUC o cédula")
         self.usuario.setMaxLength(13)
-        self.ci_adicional = QLineEdit(str(self.ajustes.value("ci_adicional", "")))
+        self.ci_adicional = QLineEdit()
         self.ci_adicional.setPlaceholderText("Solo si eres usuario adicional")
         self.ci_adicional.setMaxLength(10)
         self.clave = QLineEdit()
         self.clave.setEchoMode(QLineEdit.Password)
-        self.clave.setPlaceholderText("Clave del SRI (no se guarda)")
+        self.clave.setPlaceholderText("Clave del SRI")
         self.clave.returnPressed.connect(self._descargar)
         ver = QToolButton()
         ver.setText("👁")
         ver.setCheckable(True)
         ver.setToolTip("Mostrar u ocultar la clave")
         ver.toggled.connect(lambda v: self.clave.setEchoMode(QLineEdit.Normal if v else QLineEdit.Password))
-        self.chk_recordar = QCheckBox("Recordar RUC (la clave nunca se guarda)")
-        self.chk_recordar.setChecked(self.ajustes.value("recordar", "true") == "true")
-        gl.addWidget(QLabel("RUC / C.I."), 0, 0)
-        gl.addWidget(self.usuario, 0, 1, 1, 2)
-        gl.addWidget(QLabel("C.I. adicional"), 1, 0)
-        gl.addWidget(self.ci_adicional, 1, 1, 1, 2)
-        gl.addWidget(QLabel("Clave"), 2, 0)
-        gl.addWidget(self.clave, 2, 1)
-        gl.addWidget(ver, 2, 2)
-        gl.addWidget(self.chk_recordar, 3, 0, 1, 3)
+        self.chk_guardar_clave = QCheckBox("Guardar la clave en este equipo")
+        if credenciales.llavero_disponible():
+            self.chk_guardar_clave.setToolTip(
+                "Se guarda cifrada en el llavero del sistema (Llavero de GNOME / Administrador de "
+                "credenciales de Windows), solo después de que el SRI la acepte.")
+            self.chk_guardar_clave.setChecked(self.ajustes.value("guardar_clave", "false") == "true")
+        else:
+            self.chk_guardar_clave.setEnabled(False)
+            self.chk_guardar_clave.setText("Guardar la clave (no disponible: el sistema no tiene llavero)")
+        gl.addWidget(QLabel("Empresa"), 0, 0)
+        gl.addWidget(self.cmb_empresas, 0, 1)
+        gl.addWidget(self.btn_olvidar, 0, 2)
+        gl.addWidget(QLabel("RUC / C.I."), 1, 0)
+        gl.addWidget(self.usuario, 1, 1, 1, 2)
+        gl.addWidget(QLabel("C.I. adicional"), 2, 0)
+        gl.addWidget(self.ci_adicional, 2, 1, 1, 2)
+        gl.addWidget(QLabel("Clave"), 3, 0)
+        gl.addWidget(self.clave, 3, 1)
+        gl.addWidget(ver, 3, 2)
+        gl.addWidget(self.chk_guardar_clave, 4, 0, 1, 3)
+        self._cargar_empresas()
         lay.addWidget(g)
 
         self.lbl_empresa = QLabel("Empresa: sin sesión")
@@ -267,6 +287,98 @@ class Ventana(QMainWindow):
         self.activateWindow()
         return True
 
+    # --- empresas guardadas -------------------------------------------------------
+
+    def _empresas(self) -> list[dict]:
+        import json
+        try:
+            lista = json.loads(str(self.ajustes.value("empresas", "[]")))
+        except ValueError:
+            lista = []
+        # versiones anteriores guardaban solo un RUC
+        viejo = str(self.ajustes.value("usuario", "") or "")
+        if viejo and not any(e.get("usuario") == viejo for e in lista):
+            lista.append({"usuario": viejo, "ci": str(self.ajustes.value("ci_adicional", "") or ""), "razon": ""})
+            self.ajustes.remove("usuario")
+            self.ajustes.remove("ci_adicional")
+            self._guardar_empresas(lista)
+        return lista
+
+    def _guardar_empresas(self, lista: list[dict]) -> None:
+        import json
+        self.ajustes.setValue("empresas", json.dumps(lista, ensure_ascii=False))
+
+    def _cargar_empresas(self, elegir: tuple[str, str] | None = None):
+        lista = self._empresas()
+        self.cmb_empresas.clear()
+        self.cmb_empresas.addItem("— Nueva empresa —", None)
+        for e in lista:
+            llave = " 🔑" if credenciales.leer(e["usuario"], e.get("ci", "")) else ""
+            nombre = f"{e.get('razon') or 'sin nombre'} · {e['usuario']}" + (f" ({e['ci']})" if e.get("ci") else "")
+            self.cmb_empresas.addItem(nombre + llave, (e["usuario"], e.get("ci", "")))
+        ultima = str(self.ajustes.value("ultima_empresa", "") or "")
+        objetivo = elegir or (tuple(ultima.split("|", 1)) if ultima else None)
+        if objetivo:
+            for i in range(1, self.cmb_empresas.count()):
+                if tuple(self.cmb_empresas.itemData(i)) == tuple(objetivo):
+                    self.cmb_empresas.setCurrentIndex(i)
+                    self._elegir_empresa(i)
+                    break
+        self.btn_olvidar.setEnabled(self.cmb_empresas.currentIndex() > 0)
+
+    def _elegir_empresa(self, i: int):
+        dato = self.cmb_empresas.itemData(i)
+        self.btn_olvidar.setEnabled(dato is not None)
+        if not dato:
+            self.usuario.clear()
+            self.ci_adicional.clear()
+            self.clave.clear()
+            self.usuario.setFocus()
+            return
+        usuario, ci = dato
+        self.usuario.setText(usuario)
+        self.ci_adicional.setText(ci)
+        guardada = credenciales.leer(usuario, ci)
+        self.clave.setText(guardada or "")
+        if guardada:
+            self.chk_guardar_clave.setChecked(True)
+        else:
+            self.clave.setFocus()
+        self.ajustes.setValue("ultima_empresa", f"{usuario}|{ci}")
+
+    def _olvidar_empresa(self):
+        dato = self.cmb_empresas.currentData()
+        if not dato:
+            return
+        usuario, ci = dato
+        if QMessageBox.question(self, NOMBRE_APP, f"¿Quitar {usuario} de la lista y borrar su clave guardada?") \
+                != QMessageBox.Yes:
+            return
+        credenciales.borrar(usuario, ci)
+        self._guardar_empresas([e for e in self._empresas()
+                                if (e["usuario"], e.get("ci", "")) != (usuario, ci)])
+        self.ajustes.remove("ultima_empresa")
+        self._cargar_empresas()
+        self._elegir_empresa(0)
+        self._log(f"Se olvidó {usuario} y su clave guardada.", "info")
+
+    def _ingreso_correcto(self, ruc: str, razon: str):
+        """El SRI aceptó la clave: recordar la empresa y, si se pidió, guardar la clave."""
+        if not self._pendiente:
+            return
+        usuario, ci, clave = self._pendiente
+        lista = [e for e in self._empresas() if (e["usuario"], e.get("ci", "")) != (usuario, ci)]
+        lista.insert(0, {"usuario": usuario, "ci": ci, "razon": razon})
+        self._guardar_empresas(lista)
+        self.ajustes.setValue("ultima_empresa", f"{usuario}|{ci}")
+        if clave:
+            if credenciales.guardar(usuario, ci, clave):
+                self._log("Clave guardada en el llavero del sistema.", "ok")
+            else:
+                self._log("No se pudo guardar la clave en el llavero del sistema.", "alerta")
+        self._pendiente = (usuario, ci, "")
+        self._cargar_empresas((usuario, ci))
+
     def _ver_navegador(self):
         if self._asegurar_navegador():
             self.nav.mostrar()
@@ -310,16 +422,15 @@ class Ventana(QMainWindow):
         self.btn_descargar.setEnabled(not ocupado)
         self.btn_detener.setEnabled(ocupado)
         self.btn_sesion.setEnabled(not ocupado and self.empresa is not None)
-        for w in (self.usuario, self.ci_adicional, self.clave, self.mes, self.anio):
+        for w in (self.usuario, self.ci_adicional, self.clave, self.mes, self.anio, self.cmb_empresas,
+                  self.btn_olvidar, self.chk_guardar_clave):
             w.setEnabled(not ocupado)
 
     def _guardar_ajustes(self):
         a = self.ajustes
         a.setValue("anio", self.anio.value())
         a.setValue("mes", self.mes.currentIndex())
-        a.setValue("recordar", "true" if self.chk_recordar.isChecked() else "false")
-        a.setValue("usuario", self.usuario.text().strip() if self.chk_recordar.isChecked() else "")
-        a.setValue("ci_adicional", self.ci_adicional.text().strip() if self.chk_recordar.isChecked() else "")
+        a.setValue("guardar_clave", "true" if self.chk_guardar_clave.isChecked() else "false")
         for i, c in enumerate((self.chk_rec, self.chk_emi, self.chk_anu)):
             a.setValue(f"sec{i}", "true" if c.isChecked() else "false")
         for cod, c in self.chk_tipos.items():
@@ -350,8 +461,15 @@ class Ventana(QMainWindow):
         if not self._asegurar_navegador():
             return
         self._guardar_ajustes()
-        cred = Credenciales(usuario, self.clave.text(), self.ci_adicional.text().strip())
-        self.clave.clear()  # la clave solo vive mientras se entra al SRI
+        ci = self.ci_adicional.text().strip()
+        clave = self.clave.text()
+        guardada = credenciales.leer(usuario, ci) if self.chk_guardar_clave.isChecked() else None
+        quiere_guardar = self.chk_guardar_clave.isChecked() and bool(clave)
+        # una clave nueva se comprueba con el SRI antes de guardarla
+        cred = Credenciales(usuario, clave, ci, verificar=quiere_guardar and clave != guardada)
+        self._pendiente = (usuario, ci, clave if quiere_guardar else "")
+        if not self.chk_guardar_clave.isChecked():
+            self.clave.clear()  # sin guardar: la clave solo vive mientras dura la descarga
         op = Opciones(
             base=Path(self.carpeta.text()),
             ruc=usuario,
@@ -408,6 +526,15 @@ class Ventana(QMainWindow):
             self.activateWindow()
 
     def _terminado(self, ok: bool, msg: str):
+        pendiente, self._pendiente = self._pendiente, None
+        if not ok and "no aceptó el ingreso" in msg and pendiente:
+            usuario, ci, _ = pendiente
+            if credenciales.leer(usuario, ci) and QMessageBox.question(
+                    self, NOMBRE_APP, "El SRI no aceptó la clave guardada (¿la cambiaste en el SRI?).\n"
+                    "¿Borrar la clave guardada para escribir la nueva?") == QMessageBox.Yes:
+                credenciales.borrar(usuario, ci)
+                self.clave.clear()
+                self._cargar_empresas((usuario, ci))
         self.empresa = None  # se vuelve a leer de la cabecera
         self._detectar_empresa()
         primera = msg.split("\n", 1)[0]

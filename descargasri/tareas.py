@@ -69,6 +69,13 @@ class Captcha:
 
 
 @dataclass
+class IngresoCorrecto:
+    """El SRI aceptó usuario y clave (la ventana puede guardarlos si se pidió)."""
+    ruc: str
+    razon: str
+
+
+@dataclass
 class BorrarSesion:
     """Cierra la sesión del SRI en el navegador (borra sus cookies)."""
 
@@ -79,6 +86,7 @@ class Credenciales:
     usuario: str
     clave: str
     ci_adicional: str = ""
+    verificar: bool = False  # entrar de nuevo aunque haya sesión, para comprobar la clave
 
     def __repr__(self) -> str:  # nunca mostrar la clave en registros
         return f"Credenciales(usuario={self.usuario!r}, ci_adicional={self.ci_adicional!r}, clave=***)"
@@ -189,35 +197,56 @@ def iniciar_sesion(cred: Credenciales, silencioso: bool = False) -> Tarea:
         yield Esperar(750)
     if not estado.get("login"):
         emp = yield from comprobar_sesion()
-        if cred.corresponde(emp["ruc"]):
+        if cred.corresponde(emp["ruc"]) and cred.verificar and cred.clave:
+            yield Aviso("Se vuelve a entrar para comprobar la clave antes de guardarla.")
+            yield BorrarSesion()
+            yield Navegar(portal.URL_RECIBIDOS)
+            yield from esperar_condicion(portal.hay("document.getElementById('kc-form-login')"), bool, 45,
+                                         "abrir la página de ingreso")
+        elif cred.corresponde(emp["ruc"]):
             if not silencioso:
                 yield Aviso(f"Sesión ya abierta: {emp['ruc']} {emp.get('razon', '')}", "ok")
             return emp
-        yield Aviso(f"Había una sesión de {emp['ruc']} {emp.get('razon', '')}; se cierra para entrar con {cred.usuario}.")
-        yield BorrarSesion()
-        yield Navegar(portal.URL_RECIBIDOS)
-        yield from esperar_condicion(portal.hay("document.getElementById('kc-form-login')"), bool, 45,
-                                     "abrir la página de ingreso")
+        else:
+            yield Aviso(f"Había una sesión de {emp['ruc']} {emp.get('razon', '')}; "
+                        f"se cierra para entrar con {cred.usuario}.")
+            yield BorrarSesion()
+            yield Navegar(portal.URL_RECIBIDOS)
+            yield from esperar_condicion(portal.hay("document.getElementById('kc-form-login')"), bool, 45,
+                                         "abrir la página de ingreso")
     if not cred.clave:
         raise FallaFatal("El SRI pide entrar de nuevo: escribe la clave y pulsa Descargar.")
-    r = yield Js(portal.ingresar(cred.usuario.strip(), cred.ci_adicional.strip(), cred.clave))
-    if not r or not r.get("ok"):
-        raise Falla((r or {}).get("e", "No se pudo llenar el ingreso del SRI."))
-    yield Esperar(2000)
-    for _ in range(60):
-        e = (yield Js(portal.error_login())) or {}
-        if not e.get("login"):
+    for intento in (1, 2):
+        r = yield Js(portal.ingresar(cred.usuario.strip(), cred.ci_adicional.strip(), cred.clave))
+        if not r or not r.get("ok"):
+            raise Falla((r or {}).get("e", "No se pudo llenar el ingreso del SRI."))
+        yield Esperar(2000)
+        error = ""
+        for _ in range(60):
+            e = (yield Js(portal.error_login())) or {}
+            if not e.get("login"):
+                break
+            if e.get("error"):
+                error = e["error"]
+                break
+            yield Esperar(750)
+        else:
+            raise Falla("El SRI no terminó el ingreso a tiempo.")
+        if not error:
             break
-        if e.get("error"):
-            raise FallaFatal(f"El SRI no aceptó el ingreso: {e['error']}")
-        yield Esperar(750)
-    else:
-        raise Falla("El SRI no terminó el ingreso a tiempo.")
+        if intento == 1 and "tardado demasiado" in error.lower():
+            # la página de ingreso caducó: se abre de nuevo y se reintenta
+            yield Navegar(portal.URL_RECIBIDOS)
+            yield from esperar_condicion(portal.hay("document.getElementById('kc-form-login')"), bool, 45,
+                                         "abrir la página de ingreso")
+            continue
+        raise FallaFatal(f"El SRI no aceptó el ingreso: {error}")
     emp = yield from comprobar_sesion(30)
     if not cred.corresponde(emp["ruc"]):
         yield Aviso(f"Entraste como {emp['ruc']} {emp.get('razon', '')}.", "alerta")
     yield Aviso(("Se volvió a entrar al SRI: " if silencioso else "Ingreso correcto: ")
                 + f"{emp['ruc']} {emp.get('razon', '')}", "ok")
+    yield IngresoCorrecto(emp["ruc"], emp.get("razon", ""))
     return emp
 
 
