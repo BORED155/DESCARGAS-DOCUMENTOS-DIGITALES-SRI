@@ -63,12 +63,28 @@ class Ventana(QMainWindow):
         self._reloj.timeout.connect(self._detectar_empresa)
         self._reloj.start(3000)
         self._actualizar_botones()
-        exe = buscar_ejecutable()
-        if exe:
-            from ..navegador import nombre_navegador
-            self._log(f"Navegador para el SRI: {nombre_navegador(exe)}", "info")
-        if not exe:
-            self._log("No encontré Brave, Chrome ni Edge: la app necesita uno de ellos instalado.", "error")
+        QTimer.singleShot(0, self._primera_vez)
+
+    def _primera_vez(self):
+        if self.ajustes.value("configurado", "") != "si":
+            self._configurar()
+        self._mostrar_navegador()
+
+    def _configurar(self):
+        from .asistente import Asistente
+
+        if Asistente(self.ajustes, self).exec():
+            self.carpeta.setText(str(self.ajustes.value("carpeta")))
+            self._mostrar_navegador()
+
+    def _mostrar_navegador(self):
+        from ..navegador import nombre_navegador
+
+        exe = str(self.ajustes.value("navegador", "") or "") or buscar_ejecutable()
+        if exe and Path(exe).is_file() or (exe and not Path(exe).is_absolute()):
+            self.lbl_navegador.setText(f"Navegador: {nombre_navegador(exe)}")
+        else:
+            self.lbl_navegador.setText("Navegador: ninguno — pulsa Configuración")
 
     # --- panel ---------------------------------------------------------------
 
@@ -200,10 +216,18 @@ class Ventana(QMainWindow):
         fila.addWidget(self.btn_ver)
         lay.addLayout(fila)
 
+        b = QPushButton("Configuración")
+        b.setToolTip("Navegador y carpeta de destino")
+        b.clicked.connect(self._configurar)
+        fila.addWidget(b)
+
         self.btn_sesion = QPushButton("Cerrar sesión del SRI")
         self.btn_sesion.setObjectName("sesion")
         self.btn_sesion.clicked.connect(self._cerrar_sesion)
         fila.addWidget(self.btn_sesion)
+        self.lbl_navegador = QLabel("")
+        self.lbl_navegador.setStyleSheet("color:#666")
+        lay.addWidget(self.lbl_navegador)
         return p
 
     # --- acciones ----------------------------------------------------------------
@@ -226,8 +250,11 @@ class Ventana(QMainWindow):
     def _asegurar_navegador(self) -> bool:
         if self.nav.disponible():
             return True
+        exe = str(self.ajustes.value("navegador", "") or "") or None
+        if exe and not Path(exe).is_file():
+            exe = None
         try:
-            self.nav.abrir(portal.INICIO)
+            self.nav.abrir(portal.INICIO, exe)
         except NavegadorError as e:
             QMessageBox.warning(self, NOMBRE_APP, str(e))
             return False

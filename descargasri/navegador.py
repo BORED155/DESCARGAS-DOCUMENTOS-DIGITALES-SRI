@@ -67,6 +67,22 @@ def buscar_ejecutable() -> str | None:
     return None
 
 
+def navegadores_instalados() -> list[tuple[str, str]]:
+    """(nombre, ruta) de cada navegador compatible encontrado, en orden de preferencia."""
+    vistos: set[str] = set()
+    out = []
+    for c in candidatos():
+        ruta = c if os.path.isabs(c) and os.path.isfile(c) else (None if os.path.isabs(c) else shutil.which(c))
+        if not ruta:
+            continue
+        real = os.path.realpath(ruta)
+        if real in vistos:
+            continue
+        vistos.add(real)
+        out.append((nombre_navegador(ruta), ruta))
+    return out
+
+
 def nombre_navegador(ruta: str) -> str:
     r = ruta.lower()
     return ("Brave" if "brave" in r else "Edge" if "edge" in r else "Chrome" if "chrome" in r else "Chromium")
@@ -109,7 +125,7 @@ class Navegador:
 
     def __init__(self, perfil: Path, puerto: int = PUERTO_DEFECTO):
         self.perfil = Path(perfil)
-        self.puerto = puerto
+        self.puerto = int(os.environ.get("DESCARGASRI_PUERTO", puerto))  # para pruebas
         self.proceso: subprocess.Popen | None = None
         self._ws = None
         self._id_pestana: str | None = None
