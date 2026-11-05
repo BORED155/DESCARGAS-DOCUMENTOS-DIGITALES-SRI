@@ -68,6 +68,8 @@ class RegistroMes:
         self.datos: dict[str, Registro] = {}
         self.anulados: dict[str, dict] = {}
         self.comprobacion: dict[str, dict] = {}
+        # días de emitidos ya consultados y completos: "tipo|aaaa-mm-dd" -> cantidad en el SRI
+        self.dias_verificados: dict[str, int] = {}
         if self.ruta.is_file():
             try:
                 crudo = json.loads(self.ruta.read_text(encoding="utf-8"))
@@ -75,6 +77,7 @@ class RegistroMes:
                     self.datos[k] = Registro(**{c: v[c] for c in Registro.__dataclass_fields__ if c in v})
                 self.anulados = crudo.get("anulados", {})
                 self.comprobacion = crudo.get("comprobacion", {})
+                self.dias_verificados = crudo.get("dias_verificados", {})
             except (ValueError, TypeError, KeyError):
                 pass
 
@@ -92,12 +95,25 @@ class RegistroMes:
         if clave in self.datos:
             self.datos[clave].anulado = True
 
+    def archivos_presentes(self, base_empresa: Path, reg: Registro) -> bool:
+        return any((Path(base_empresa) / a).is_file() for a in reg.archivos)
+
+    def inventario(self, base_empresa: Path) -> dict[tuple[str, str], int]:
+        """(sección, tipo) -> comprobantes del mes cuyo archivo sigue en la carpeta."""
+        out: dict[tuple[str, str], int] = {}
+        for r in self.datos.values():
+            if self.archivos_presentes(base_empresa, r):
+                k = (r.seccion, r.tipo)
+                out[k] = out.get(k, 0) + 1
+        return out
+
     def guardar(self) -> None:
         self.carpeta.mkdir(parents=True, exist_ok=True)
         crudo = {
             "comprobantes": {k: asdict(v) for k, v in sorted(self.datos.items())},
             "anulados": dict(sorted(self.anulados.items())),
             "comprobacion": self.comprobacion,
+            "dias_verificados": dict(sorted(self.dias_verificados.items())),
         }
         tmp = self.ruta.with_suffix(".tmp")
         tmp.write_text(json.dumps(crudo, ensure_ascii=False, indent=1), encoding="utf-8")

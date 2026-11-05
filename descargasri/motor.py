@@ -112,11 +112,27 @@ class Motor(QObject):
                 except StopIteration as fin:
                     res = fin.value
                     if res is not None and hasattr(res, "completo"):
+                        lineas = []
+                        for (mes, sec, tipo), c in sorted(res.conteos.items()):
+                            if sec == "anulados" or (c.sri == 0 and c.completo):
+                                continue
+                            marca = "✔" if c.completo else "✘"
+                            lineas.append(f"{marca} {sec.capitalize()} · {tipo}: SRI {c.sri} · en carpeta {c.guardados}")
+                        anu = [c for (m, sec, t), c in res.conteos.items() if sec == "anulados"]
+                        hubo_comprobantes = any(sec != "anulados" for (m, sec, t) in res.conteos)
+                        if not lineas and hubo_comprobantes:
+                            lineas.append("El SRI no tiene comprobantes para ese periodo.")
+                        if anu and not res.anulados_fallidos:
+                            lineas.append(f"Anulados: {res.anulados} (marcados en el Excel índice)")
+                        detalle = "\n".join(lineas)
+                        extra = f"\nNuevos: {res.nuevos} · ya estaban: {res.existentes}"
+                        if res.anulados_fallidos:
+                            extra += "\n⚠ No se pudo leer la lista de anulados."
                         if res.completo:
-                            msg = "Descarga COMPLETA: todo lo que reporta el SRI está en la carpeta."
+                            msg = "Descarga COMPLETA\n\n" + detalle + extra
                         else:
-                            ok, msg = False, ("Descarga INCOMPLETA: revisa las líneas marcadas con ✘ y pulsa "
-                                              "Descargar otra vez (solo baja lo que falta).")
+                            ok, msg = False, ("Descarga INCOMPLETA\n\n" + detalle + extra +
+                                              "\n\nPulsa Descargar otra vez: solo se baja lo que falta.")
                     break
                 valor, error = None, None
                 try:

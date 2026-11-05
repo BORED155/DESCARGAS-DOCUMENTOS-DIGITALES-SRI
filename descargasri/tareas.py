@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Generator
 
 from . import almacen, portal, soap, xmlinfo
-from .clave import Clave, buscar_clave
+from .clave import Clave, buscar_clave, leer_clave
 
 
 # --- Órdenes para el motor ------------------------------------------------
@@ -112,6 +112,8 @@ class Opciones:
     con_pdf: bool = False
     pausa_ms: tuple[int, int] = (400, 1000)
     hoy: date = field(default_factory=date.today)
+    revisar_todo: bool = False  # volver a consultar en el SRI los días de emitidos ya verificados
+    dias_recientes: int = 3     # estos últimos días siempre se vuelven a consultar
     cred: "Credenciales | None" = field(default=None, repr=False)
 
     @property
@@ -123,6 +125,7 @@ class Opciones:
 class Resumen:
     conteos: dict = field(default_factory=dict)  # (mes, sección, tipo) -> Conteo
     completo: bool = False
+    anulados_fallidos: bool = False
     nuevos: int = 0
     existentes: int = 0
     errores: int = 0
@@ -686,6 +689,29 @@ def dias_del_mes(anio: int, mes: int, hoy: date) -> list[date]:
     return [date(anio, mes, d) for d in range(1, ultimo + 1) if date(anio, mes, d) <= hoy]
 
 
+TIPO_PORTAL_A_CLAVE = {"1": "01", "2": "03", "3": "04", "4": "05", "5": "06", "6": "07"}
+
+
+def dia_ya_verificado(op: Opciones, regs: Registros, d: date, tipo: str) -> int | None:
+    """Si el día se verificó completo antes y sus archivos siguen en la carpeta, devuelve cuántos tenía."""
+    if op.revisar_todo or (op.hoy - d).days < op.dias_recientes:
+        return None
+    rmes = regs.de(d.year, d.month)
+    previo = rmes.dias_verificados.get(f"{tipo}|{d.isoformat()}")
+    if previo is None:
+        return None
+    if previo == 0:
+        return 0
+    cod = TIPO_PORTAL_A_CLAVE.get(tipo)
+    presentes = 0
+    for r in rmes.datos.values():
+        c = leer_clave(r.clave)
+        if r.seccion == "emitidos" and c and c.tipo == cod and c.fecha == d and \
+                rmes.archivos_presentes(op.carpeta, r):
+            presentes += 1
+    return previo if presentes >= previo else None
+
+
 def emitidos_dia(op: Opciones, regs: Registros, res: Resumen, srv: EstadoServicio, d: date, tipo: str) -> Tarea:
     sufijo = "tablaCompEmitidos"
     hay = yield Js(portal.hay("document.getElementById('frmPrincipal:calendarFechaDesde_input')"))
@@ -708,9 +734,17 @@ def tarea_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoServi
     for tipo in op.tipos_emitidos:
         nombre = portal.TIPOS_PORTAL[tipo]
         total = res.conteo(mes, "emitidos", nombre)
+        saltados = 0
         for d in dias:
             desc = f"Emitidos {d:%d/%m/%Y} · {nombre}"
             yield from avance(desc)
+            previo = dia_ya_verificado(op, regs, d, tipo)
+            if previo is not None:  # ya estaba completo: no se vuelve a consultar
+                total.sri += previo
+                total.leidos += previo
+                total.guardados += previo
+                saltados += 1
+                continue
             c = yield from unidad(op, desc, lambda: emitidos_dia(op, regs, res, srv, d, tipo))
             if c is None:
                 total.fallidos.append(f"{d:%d/%m}")
@@ -718,7 +752,12 @@ def tarea_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoServi
                 total.sri += c.sri
                 total.leidos += c.leidos
                 total.guardados += c.guardados
+                if c.completo:
+                    regs.de(d.year, d.month).dias_verificados[f"{tipo}|{d.isoformat()}"] = c.sri
             yield from pausa(op)
+        if saltados:
+            yield Aviso(f"Emitidos {mes:02d}/{op.anio} · {nombre}: {saltados} día(s) ya verificados antes, "
+                        "no se volvieron a consultar.")
         yield Aviso(f"Emitidos {mes:02d}/{op.anio} · {nombre}: {total.sri}", "ok" if total.sri else "info")
         regs.guardar()
 
@@ -733,6 +772,21 @@ def _columna(cols: list[str], *palabras: str) -> int | None:
     return None
 
 
+def _esperar_tablas_anulados(timeout_s: float = 60) -> Tarea:
+    for _ in range(int(timeout_s * 2)):
+        e = (yield Js(portal.estado_anulados())) or {}
+        if e.get("nuevas", 0) > 0 and e.get("libre", True):
+            yield Esperar(400)
+            return e
+        if e.get("mensajes"):
+            msg = e["mensajes"]
+            if NO_HAY_DATOS in msg.lower():
+                return e
+            raise Falla(f"el SRI respondió «{msg}».")
+        yield Esperar(500)
+    raise Falla("el portal no devolvió la lista de anulados.")
+
+
 def anulados_mes(op: Opciones, regs: Registros, mes: int) -> Tarea:
     yield Navegar(portal.URL_ANULACION)
     enlace = "Consulta comprobantes anulados"
@@ -745,30 +799,15 @@ def anulados_mes(op: Opciones, regs: Registros, mes: int) -> Tarea:
         bool, 60, "abrir consulta de anulados")
     r = yield Js(portal.consultar_anulados(op.anio, mes))
     if not r or not r.get("ok"):
-        raise Falla((r or {}).get("e", "no se pudo consultar anulados."))
-    for _ in range(120):
-        e = (yield Js(portal.estado_anulados())) or {}
-        if e.get("libre") and (e.get("nuevas", 0) > 0 or e.get("mensajes")):
-            break
-        yield Esperar(500)
-    else:
-        raise Falla("el portal no devolvió la lista de anulados.")
-    yield Esperar(500)
-    k = yield Js(portal.anulados_filas_por_pagina())
-    if k:
-        yield Esperar(1500)
-        for _ in range(60):
-            e = (yield Js(portal.estado_anulados())) or {}
-            if e.get("libre"):
-                break
-            yield Esperar(500)
-    tablas = (yield Js(portal.leer_anulados())) or []
+        e = (r or {}).get("e", "no se pudo consultar anulados.")
+        raise (FallaFatal if "no permite" in e else Falla)(e)
+    yield from _esperar_tablas_anulados()
     n = 0
-    for t in tablas:
-        pag = t.get("pag") or {}
-        if pag.get("total", 0) > len(t.get("filas", [])):
-            raise Falla(f"anulados {t.get('lado')}: el portal tiene {pag['total']} y se leyeron "
-                        f"{len(t.get('filas', []))}.")
+    vistos: set[str] = set()
+    tablas = (yield Js(portal.leer_anulados())) or []
+    pendientes = list(tablas)
+    while pendientes:
+        t = pendientes.pop(0)
         cols = t.get("cols", [])
         i_id = _columna(cols, "identificación", "identificacion", "ruc")
         i_raz = _columna(cols, "razón", "razon")
@@ -776,8 +815,9 @@ def anulados_mes(op: Opciones, regs: Registros, mes: int) -> Tarea:
         i_serie = _columna(cols, "serie")
         for celdas in t.get("filas", []):
             clave = buscar_clave(" ".join(celdas))
-            if not clave:
+            if not clave or clave.texto in vistos:
                 continue
+            vistos.add(clave.texto)
 
             def c(i):
                 return celdas[i] if i is not None and i < len(celdas) else ""
@@ -787,6 +827,13 @@ def anulados_mes(op: Opciones, regs: Registros, mes: int) -> Tarea:
                 "tipo": c(i_tipo) or clave.nombre_tipo, "serie": c(i_serie) or clave.serie,
             })
             n += 1
+        if t.get("hay_siguiente") and t.get("id"):
+            paso = yield Js(portal.anulados_siguiente_pagina(t["id"]))
+            if paso:
+                yield from _esperar_tablas_anulados()
+                otra = next((x for x in ((yield Js(portal.leer_anulados())) or []) if x.get("id") == t["id"]), None)
+                if otra:
+                    pendientes.insert(0, otra)
     return n
 
 
@@ -822,7 +869,9 @@ def total_pasos(op: Opciones) -> int:
 
 
 def comprobacion(res: Resumen, regs: Registros, op: Opciones) -> Tarea:
-    """Compara lo que dice el SRI con lo que quedó en la carpeta y lo deja en el registro."""
+    """Compara lo que dice el SRI con lo que quedó en la carpeta y lo deja en el registro.
+
+    Devuelve si los comprobantes están completos (los anulados se informan aparte)."""
     todo_bien = True
     for (mes, seccion, tipo), c in sorted(res.conteos.items()):
         rmes = regs.de(op.anio, mes)
@@ -830,7 +879,10 @@ def comprobacion(res: Resumen, regs: Registros, op: Opciones) -> Tarea:
             "sri": c.sri, "leidos": c.leidos, "guardados": c.guardados, "fallidos": c.fallidos,
             "completo": c.completo,
         }
-        if seccion == "anulados" and not c.fallidos:
+        if seccion == "anulados":
+            if c.fallidos:
+                res.anulados_fallidos = True
+                yield Aviso("⚠ Anulados: el SRI no devolvió la lista; vuelve a intentarlo más tarde.", "alerta")
             continue
         if c.completo and c.sri == 0:
             continue
@@ -868,6 +920,14 @@ def descargar(op: Opciones, cred: Credenciales | None = None) -> Tarea:
         if not meses:
             raise Falla("El mes elegido todavía no ha empezado.")
         yield Aviso(f"Empresa {op.ruc} {op.razon} · {', '.join(f'{m:02d}' for m in meses)}/{op.anio}")
+        for mes in meses:
+            inv = regs.de(op.anio, mes).inventario(op.carpeta)
+            if inv:
+                partes = ", ".join(f"{n} {t.lower()} {s}" for (s, t), n in sorted(inv.items()))
+                yield Aviso(f"En la carpeta ya hay ({mes:02d}/{op.anio}): {partes}. "
+                            "Solo se bajará lo que falte.")
+            else:
+                yield Aviso(f"La carpeta de {mes:02d}/{op.anio} está vacía: se baja todo.")
         try:
             for mes in meses:
                 if op.recibidos and op.tipos_recibidos:
@@ -889,7 +949,8 @@ def descargar(op: Opciones, cred: Credenciales | None = None) -> Tarea:
         f"{res.nuevos} nuevo(s) ({res.xml_portal} XML del portal, {res.xml_servicio} XML del servicio web, "
         f"{res.pdf} PDF), {res.existentes} ya existían, {res.anulados} anulado(s).", "info")
     if res.completo:
-        yield Aviso("COMPLETO: todo lo que el SRI reporta para el periodo está en la carpeta.", "ok")
+        yield Aviso("COMPLETO: todo lo que el SRI reporta para el periodo está en la carpeta."
+                    + (" (Falta solo la lista de anulados.)" if res.anulados_fallidos else ""), "ok")
     else:
         yield Aviso("INCOMPLETO: faltan comprobantes. Pulsa Descargar otra vez (solo baja lo que falta).", "error")
     return res

@@ -283,6 +283,10 @@ def clic_texto(texto: str) -> str:
     return js(f"return D.clicTexto({json.dumps(texto)});")
 
 
+# La página de anulados usa RichFaces (table.rf-dt + paginador rf-ds), no PrimeFaces.
+_TABLAS_ANULADOS = "table.rf-dt, .ui-datatable"
+
+
 def consultar_anulados(anio: int, mes: int) -> str:
     return js(f"""
       const f = document.getElementById('frmPrincipal') || document.forms[document.forms.length - 1];
@@ -294,7 +298,12 @@ def consultar_anulados(anio: int, mes: int) -> str:
       const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
       if (!D.elegir(sm, meses[{mes} - 1]) && !D.elegir(sm, '{mes}')) return {{ok: false, e: 'Mes no disponible'}};
       D.marcar();
-      const b = [...f.querySelectorAll('button, input[type=submit]')].find(x => /consultar/i.test(x.innerText || x.value || ''));
+      document.querySelectorAll('{_TABLAS_ANULADOS}').forEach(t => {{
+        t.setAttribute('data-dds-viejo', '1');
+        t.querySelectorAll('tbody tr').forEach(r => r.setAttribute('data-dds-viejo', '1'));
+      }});
+      const b = document.getElementById('frmPrincipal:btnAceptar') ||
+        [...f.querySelectorAll('button, input[type=submit]')].find(x => /consultar/i.test(x.innerText || x.value || ''));
       if (!b) return {{ok: false, e: 'No encontré el botón Consultar en anulados'}};
       b.click();
       return {{ok: true}};
@@ -302,38 +311,39 @@ def consultar_anulados(anio: int, mes: int) -> str:
 
 
 def estado_anulados() -> str:
-    return js("""
-      const ts = [...document.querySelectorAll('.ui-datatable')];
-      const nuevas = ts.filter(t => !t.hasAttribute('data-dds-viejo'));
-      return {libre: D.ajaxLibre(), nuevas: nuevas.length, total: ts.length, mensajes: D.mensajes()};
+    """Las tablas se vuelven a dibujar tras la consulta (o tras cambiar de página)."""
+    return js(f"""
+      const ts = [...document.querySelectorAll('{_TABLAS_ANULADOS}')];
+      const nuevas = ts.filter(t => !t.hasAttribute('data-dds-viejo') ||
+        (t.querySelector('tbody tr') && ![...t.querySelectorAll('tbody tr')].some(r => r.hasAttribute('data-dds-viejo'))));
+      return {{libre: D.ajaxLibre(), nuevas: nuevas.length, total: ts.length, mensajes: D.mensajes()}};
     """)
 
 
 def leer_anulados() -> str:
-    return js("""
+    return js(f"""
       const out = [];
-      for (const t of document.querySelectorAll('.ui-datatable')) {
+      for (const t of document.querySelectorAll('{_TABLAS_ANULADOS}')) {{
         const cols = [...t.querySelectorAll('thead th')].map(h => h.innerText.replace(/\\s+/g, ' ').trim());
+        if (!cols.some(c => /clave/i.test(c))) continue;
         const lado = cols.join(' ').toLowerCase().includes('receptor') ? 'emitidos' : 'recibidos';
-        const w = t.id ? D.widget(t.id) : null;
-        const pag = w && w.cfg && w.cfg.paginator ? {total: w.cfg.paginator.rowCount, porPagina: w.cfg.paginator.rows} : null;
-        const filas = [...t.querySelectorAll('tbody tr')].filter(r => r.cells.length > 3)
-          .map(r => [...r.cells].map(c => c.innerText.replace(/\\s+/g, ' ').trim()));
-        out.push({id: t.id, lado, cols, filas, pag});
-      }
+        const filas = [...t.querySelectorAll('tbody tr')].filter(r => r.cells.length >= 5)
+          .map(r => [...r.cells].map(c => c.innerText.replace(/\\s+/g, ' ').trim()))
+          .filter(c => c.join('').length > 0);
+        const sig = t.querySelector('.rf-ds-btn-next');
+        out.push({{id: t.id, lado, cols, filas, hay_siguiente: !!sig && !sig.classList.contains('rf-ds-dis')}});
+      }}
       return out;
     """)
 
 
-def anulados_filas_por_pagina(n: int = FILAS_POR_PAGINA) -> str:
+def anulados_siguiente_pagina(id_tabla: str) -> str:
     return js(f"""
-      let k = 0;
-      for (const t of document.querySelectorAll('.ui-datatable')) {{
-        const w = t.id ? D.widget(t.id) : null;
-        if (w && w.paginator && w.cfg.paginator.rowCount > w.cfg.paginator.rows) {{
-          t.querySelectorAll('tbody tr').forEach(e => e.setAttribute('data-dds-viejo', '1'));
-          w.paginator.setRowsPerPage({int(n)}); k++;
-        }}
-      }}
-      return k;
+      const t = document.getElementById({json.dumps(id_tabla)});
+      const sig = t && t.querySelector('.rf-ds-btn-next');
+      if (!sig || sig.classList.contains('rf-ds-dis')) return false;
+      t.setAttribute('data-dds-viejo', '1');
+      t.querySelectorAll('tbody tr').forEach(r => r.setAttribute('data-dds-viejo', '1'));
+      sig.click();
+      return true;
     """)

@@ -188,8 +188,8 @@ class PortalFalso:
             return {"ok": True}
         if "nuevas:" in t:
             return {"libre": True, "nuevas": 2, "total": 2, "mensajes": ""}
-        if "let k = 0" in t:
-            return 0
+        if "rf-ds-btn-next');\n      if (!sig" in t:
+            return False
         if "const out = []" in t:
             out = []
             for lado in ("emitidos", "recibidos"):
@@ -198,7 +198,7 @@ class PortalFalso:
                 out.append({"id": lado, "lado": lado,
                             "cols": ["Identificación receptor" if lado == "emitidos" else "RUC Emisor",
                                      "Razón social", "Tipo de comprobante", "Serie de comprobante", "Clave de acceso"],
-                            "filas": filas, "pag": None})
+                            "filas": filas, "hay_siguiente": False})
             return out
         raise AssertionError("JS no esperado: " + t[:200])
 
@@ -527,3 +527,32 @@ def _correr(gen, falso, avisos):
             valor = orden.funcion(*orden.args)
         elif isinstance(orden, tareas.Aviso):
             avisos.append(orden.texto)
+
+
+def test_segunda_vez_no_vuelve_a_consultar_dias_verificados(escenario):
+    falso, op, rec, emi_reciente, emi_viejo, ret = escenario
+    op.hoy = date(2026, 4, 30)  # marzo ya cerrado
+    res1 = _correr(tareas.descargar(op), falso, [])
+    assert res1.completo
+    consultas_1 = falso.consultas
+    assert consultas_1 >= 31 * 2  # 31 días × 2 tipos de emitidos + recibidos
+
+    p2 = PortalFalso(falso.recibidos, falso.emitidos, falso.anulados)
+    avisos: list = []
+    res2 = _correr(tareas.descargar(op), p2, avisos)
+    assert res2.completo and res2.nuevos == 0
+    assert p2.consultas == 1  # solo la consulta de recibidos (facturas)
+    assert any(a.startswith("En la carpeta ya hay (03/2026)") for a in avisos)
+    assert any("día(s) ya verificados" in a for a in avisos)
+
+    # si se borra un archivo emitido, ese día se vuelve a consultar y se baja solo ese
+    (op.carpeta / "2026-03" / "emitidos" / "facturas" / f"{emi_viejo}.pdf").unlink()
+    p3 = PortalFalso(falso.recibidos, falso.emitidos, falso.anulados)
+    res3 = _correr(tareas.descargar(op), p3, [])
+    assert res3.completo and res3.nuevos == 1 and p3.consultas == 2
+
+    # «Volver a revisar todo» consulta todos los días otra vez
+    op.revisar_todo = True
+    p4 = PortalFalso(falso.recibidos, falso.emitidos, falso.anulados)
+    _correr(tareas.descargar(op), p4, [])
+    assert p4.consultas == consultas_1

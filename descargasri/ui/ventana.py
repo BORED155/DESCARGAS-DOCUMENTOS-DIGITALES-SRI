@@ -161,6 +161,9 @@ class Ventana(QMainWindow):
             c.setChecked(self.ajustes.value(f"tipo{cod}", "false" if cod == "5" else "true") == "true")
             self.chk_tipos[cod] = c
             gl.addWidget(c, i // 2, i % 2)
+        self.chk_revisar = QCheckBox("Volver a revisar todo en el SRI (más lento)")
+        self.chk_revisar.setToolTip("Consulta otra vez los días de emitidos que ya se verificaron completos")
+        gl.addWidget(self.chk_revisar, 4, 0, 1, 2)
         self.chk_pdf = QCheckBox("Guardar también el PDF (RIDE) de todo")
         self.chk_pdf.setChecked(self.ajustes.value("pdf", "false") == "true")
         gl.addWidget(self.chk_pdf, 3, 0, 1, 2)
@@ -361,6 +364,7 @@ class Ventana(QMainWindow):
             tipos_recibidos=[t for t in tipos if t in portal.TIPOS_RECIBIDOS],
             tipos_emitidos=[t for t in tipos if t in portal.TIPOS_EMITIDOS],
             con_pdf=self.chk_pdf.isChecked(),
+            revisar_todo=self.chk_revisar.isChecked(),
         )
         self.registro.clear()
         self.barra.setValue(0)
@@ -406,11 +410,14 @@ class Ventana(QMainWindow):
     def _terminado(self, ok: bool, msg: str):
         self.empresa = None  # se vuelve a leer de la cabecera
         self._detectar_empresa()
-        self._log(msg, "ok" if ok else "error")
-        self.lbl_paso.setText(msg)
+        primera = msg.split("\n", 1)[0]
+        self._log(primera, "ok" if ok else "error")
+        self.lbl_paso.setText(primera)
         self._actualizar_botones()
-        if not ok:
+        if ok:
             QMessageBox.information(self, NOMBRE_APP, msg)
+        else:
+            QMessageBox.warning(self, NOMBRE_APP, msg)
 
     def closeEvent(self, e):
         if self.motor.ocupado:
