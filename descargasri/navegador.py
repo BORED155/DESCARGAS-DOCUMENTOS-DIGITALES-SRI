@@ -281,7 +281,10 @@ class Navegador:
         limite = time.time() + timeout
         while time.time() < limite:
             try:
-                if self.evaluar("document.readyState", 5) == "complete":
+                # Basta con que el documento esté armado («interactive»): algunas páginas del SRI
+                # tardan más de un minuto en terminar de cargar recursos que la app no usa.
+                # Quien llama espera después el elemento que necesita.
+                if self.evaluar("document.readyState", 5) in ("interactive", "complete"):
                     return True
             except NavegadorError:
                 pass

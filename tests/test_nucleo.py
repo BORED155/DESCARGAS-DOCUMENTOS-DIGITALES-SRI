@@ -173,7 +173,7 @@ class PortalFalso:
                               "xml": f"frmPrincipal:tablaCompRecibidos:{k}:lnkXml" if self.seccion == "rec" else None,
                               "pdf": f"frmPrincipal:tabla:{k}:lnkPdf"})
             return {"cols": cols, "filas": filas}
-        if "btnBuscar')" in t:
+        if "btnBuscar')" in t and "click" not in t:
             return self.pagina == "rec"
         if "Comprobantes electrónicos emitidos'" in t and "some(" in t:
             return self.pagina == "consultas"
@@ -749,3 +749,13 @@ def test_puerto_ocupado_y_libre():
     assert not _puerto_libre(p)
     s.close()
     assert _puerto_libre(p)
+
+
+def test_aviso_mes_en_curso(escenario):
+    falso, op, *_ = escenario
+    op.emitidos = op.anulados = False
+    op.hoy = date(2026, 3, 20)
+    avisos: list = []
+    _correr(tareas.descargar(op), falso, avisos)
+    assert any(a.startswith("Mes en curso: lo descargado de 03/2026 llega hasta el 19/03/2026") for a in avisos)
+    assert any("desde el 11/04/2026" in a for a in avisos)

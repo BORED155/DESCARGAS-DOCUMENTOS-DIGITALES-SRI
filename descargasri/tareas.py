@@ -200,7 +200,7 @@ def iniciar_sesion(cred: Credenciales, silencioso: bool = False) -> Tarea:
         estado = (yield Js(portal.en_login())) or {}
         if estado.get("login"):
             break
-        hay = yield Js(portal.hay("document.getElementById('frmPrincipal:btnBuscar')"))
+        hay = yield Js(portal.hay("document.getElementById('frmPrincipal:btnBuscar') && window.PrimeFaces"))
         if hay:
             break
         yield Esperar(750)
@@ -721,10 +721,10 @@ def consultar_recibidos_verificado(op: Opciones, mes: int, tipo: str, reintentos
 
 
 def abrir_recibidos() -> Tarea:
-    hay = yield Js(portal.hay("document.getElementById('frmPrincipal:btnBuscar')"))
+    hay = yield Js(portal.hay("document.getElementById('frmPrincipal:btnBuscar') && window.PrimeFaces"))
     if not hay:
         yield Navegar(portal.URL_RECIBIDOS)
-        yield from esperar_condicion(portal.hay("document.getElementById('frmPrincipal:btnBuscar')"), bool, 60,
+        yield from esperar_condicion(portal.hay("document.getElementById('frmPrincipal:btnBuscar') && window.PrimeFaces"), bool, 60,
                                      "abrir comprobantes recibidos")
 
 
@@ -872,7 +872,7 @@ def abrir_emitidos() -> Tarea:
         bool, 60, "abrir consultas")
     yield Js(portal.clic_texto(enlace))
     yield from esperar_condicion(
-        portal.hay("document.getElementById('frmPrincipal:calendarFechaDesde_input')"), bool, 60,
+        portal.hay("document.getElementById('frmPrincipal:calendarFechaDesde_input') && window.PrimeFaces"), bool, 60,
         "abrir comprobantes emitidos")
 
 
@@ -909,7 +909,7 @@ def dia_ya_verificado(op: Opciones, regs: Registros, d: date, tipo: str) -> int 
 
 def emitidos_dia(op: Opciones, regs: Registros, res: Resumen, srv: EstadoServicio, d: date, tipo: str) -> Tarea:
     sufijo = "tablaCompEmitidos"
-    hay = yield Js(portal.hay("document.getElementById('frmPrincipal:calendarFechaDesde_input')"))
+    hay = yield Js(portal.hay("document.getElementById('frmPrincipal:calendarFechaDesde_input') && window.PrimeFaces"))
     if not hay:
         yield from abrir_emitidos()
     r = yield Js(portal.consultar_emitidos(d.strftime("%d/%m/%Y"), tipo))
@@ -1117,7 +1117,13 @@ def comprobacion(res: Resumen, regs: Registros, op: Opciones) -> Tarea:
         fin = date(op.anio, mes, calendar.monthrange(op.anio, mes)[1])
         repaso = fin + timedelta(days=DIAS_REPASO)
         rmes.comprobacion["_revisado"] = {"fecha": op.hoy.isoformat()}
-        if op.hoy <= repaso:
+        if op.hoy <= fin:
+            hasta = op.hoy - timedelta(days=1)
+            yield Aviso(f"Mes en curso: lo descargado de {mes:02d}/{op.anio} llega hasta el "
+                        f"{hasta:%d/%m/%Y} (emitidos) y hasta hoy (recibidos). Para completarlo, vuelve a "
+                        f"pulsar Descargar después del cierre, desde el {repaso + timedelta(days=1):%d/%m/%Y} "
+                        "(solo bajará lo nuevo).", "alerta")
+        elif op.hoy <= repaso:
             yield Aviso(f"Recordatorio: {mes:02d}/{op.anio} se revisó el {op.hoy:%d/%m/%Y}. Algunos proveedores "
                         f"autorizan con días de atraso; vuelve a pulsar Descargar desde el "
                         f"{repaso + timedelta(days=1):%d/%m/%Y} (solo bajará lo nuevo).", "alerta")
