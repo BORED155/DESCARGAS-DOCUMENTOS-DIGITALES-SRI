@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
@@ -75,4 +76,51 @@ def leer(contenido: bytes) -> Info:
                 info.sin_impuestos = nodo.findtext(campos[3]) or ""
             if campos[4]:
                 info.total = nodo.findtext(campos[4]) or ""
+    return info
+
+
+# --- RIDE (PDF) ------------------------------------------------------------------
+# El texto del RIDE del SRI trae primero las etiquetas y luego los valores:
+#   Razón Social / Nombres y Apellidos:
+#   Identificación
+#   Fecha Guía
+#   CLIENTE S.A.
+#   1790000000001
+#   02/03/2026
+
+_ETIQUETAS_RIDE = re.compile(
+    r"^(identificaci[oó]n|fecha|gu[ií]a|fecha gu[ií]a|fecha emisi[oó]n|fecha de emisi[oó]n|"
+    r"ejercicio fiscal|placa|direcci[oó]n|r\.?u\.?c\.?|tel[eé]fono|email)\b.*$", re.IGNORECASE)
+
+
+def leer_ride(contenido: bytes) -> Info:
+    """Datos básicos del receptor desde el PDF (RIDE) que entrega el portal."""
+    from io import BytesIO
+
+    from pypdf import PdfReader
+
+    info = Info()
+    texto = "\n".join(p.extract_text() or "" for p in PdfReader(BytesIO(contenido)).pages)
+    lineas = [l.strip() for l in texto.splitlines() if l.strip()]
+    for i, l in enumerate(lineas):
+        if l.lower().startswith("razón social / nombres y apellidos") or \
+                l.lower().startswith("razon social / nombres y apellidos"):
+            resto = l.split(":", 1)[1].strip() if ":" in l else ""
+            candidatos = ([resto] if resto else []) + lineas[i + 1:i + 8]
+            for c in candidatos:
+                if _ETIQUETAS_RIDE.match(c) or c.endswith(":"):
+                    continue
+                if re.fullmatch(r"[\d/\-\s.]+", c):
+                    continue
+                info.razon_receptor = c
+                j = lineas.index(c, i) if c in lineas[i:] else i
+                for d in lineas[j + 1:j + 3]:
+                    if re.fullmatch(r"\d{10,13}|[A-Z0-9]{5,20}", d):
+                        info.id_receptor = d
+                        break
+                break
+            break
+    m = re.search(r"([\d.,]+)\s*VALOR TOTAL\b", texto)
+    if m:
+        info.total = m.group(1)
     return info

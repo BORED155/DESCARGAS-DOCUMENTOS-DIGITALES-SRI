@@ -74,6 +74,8 @@ def test_es_autorizacion_rechaza_html():
 
 def test_registro_fusiona_y_marca_anulados(tmp_path: Path):
     cl = clave(date(2026, 3, 5), "01", RUC_PROVEEDOR)
+    for n in ("a.xml", "a.pdf"):
+        (tmp_path / n).write_text("x")
     reg = almacen.RegistroMes(tmp_path / "2026-03")
     reg.poner(almacen.Registro(clave=cl, seccion="recibidos", tipo="Factura", total="10,50", archivos=["a.xml"]))
     reg.poner_anulado(cl, {"lado": "recibidos"})
@@ -288,9 +290,10 @@ def test_descarga_completa_simulada(escenario):
     mes = op.carpeta / "2026-03"
     assert len(list((mes / "recibidos" / "facturas").glob("*.xml"))) == 53
     # emitido reciente: XML del servicio web; el que el SRI ya no da: PDF
-    assert (mes / "emitidos" / "facturas" / f"{emi_reciente}.xml").is_file()
-    assert (mes / "emitidos" / "facturas" / f"{emi_viejo}.pdf").is_file()
-    assert (mes / "emitidos" / "retenciones" / f"{ret}.pdf").is_file()
+    assert (mes / "emitidos" / "facturas" / "2026-03-02 CLIENTE FICTICIO Factura 001-002-000000454.xml").is_file()
+    assert (mes / "emitidos" / "facturas" / "2026-03-02 SIN NOMBRE Factura 001-002-000000455.pdf").is_file()
+    assert (mes / "emitidos" / "retenciones" / "2026-03-03 SIN NOMBRE Retención 001-002-000000012.pdf").is_file()
+    assert (mes / "recibidos" / "facturas" / "2026-03-01 PROVEEDOR FICTICIO Factura 001-001-000000001.xml").is_file()
     assert res.xml_servicio == 1 and res.anulados == 1
     datos = json.loads((mes / "registro.json").read_text(encoding="utf-8"))
     assert datos["comprobantes"][rec[0][0]]["anulado"] is True
@@ -546,7 +549,7 @@ def test_segunda_vez_no_vuelve_a_consultar_dias_verificados(escenario):
     assert any("día(s) ya verificados" in a for a in avisos)
 
     # si se borra un archivo emitido, ese día se vuelve a consultar y se baja solo ese
-    (op.carpeta / "2026-03" / "emitidos" / "facturas" / f"{emi_viejo}.pdf").unlink()
+    (op.carpeta / "2026-03" / "emitidos" / "facturas" / "2026-03-02 SIN NOMBRE Factura 001-002-000000455.pdf").unlink()
     p3 = PortalFalso(falso.recibidos, falso.emitidos, falso.anulados)
     res3 = _correr(tareas.descargar(op), p3, [])
     assert res3.completo and res3.nuevos == 1 and p3.consultas == 2
@@ -556,3 +559,24 @@ def test_segunda_vez_no_vuelve_a_consultar_dias_verificados(escenario):
     p4 = PortalFalso(falso.recibidos, falso.emitidos, falso.anulados)
     _correr(tareas.descargar(op), p4, [])
     assert p4.consultas == consultas_1
+
+
+def test_archivos_con_nombre_antiguo_se_renombran_sin_bajar(escenario):
+    falso, op, rec, *_ = escenario
+    op.emitidos = op.anulados = False
+    carpeta = op.carpeta / "2026-03" / "recibidos" / "facturas"
+    carpeta.mkdir(parents=True)
+    for cl, xml in rec[:5]:  # 5 ya bajados con la versión anterior (nombre = clave)
+        (carpeta / f"{cl}.xml").write_bytes(xml)
+    res = _correr(tareas.descargar(op), PortalFalso(falso.recibidos, {}, []), [])
+    assert res.completo and res.existentes == 5 and res.xml_portal == 48
+    nombres = sorted(x.name for x in carpeta.iterdir())
+    assert len(nombres) == 53 and not any(n.startswith("0") for n in nombres)
+    assert "2026-03-01 PROVEEDOR FICTICIO Factura 001-001-000000001.xml" in nombres
+
+
+def test_nombre_archivo_legible():
+    from descargasri.clave import leer_clave
+    c = leer_clave(clave(date(2026, 3, 31), "07", RUC_PROVEEDOR, "001", "102", 17002))
+    assert almacen.nombre_archivo(c, 'SUPER/LIQUORS: "S.A."', ".xml") == \
+        "2026-03-31 SUPER LIQUORS S.A. Retención 001-102-000017002.xml"

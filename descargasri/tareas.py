@@ -321,6 +321,16 @@ def completar_con_xml(reg: almacen.Registro, contenido: bytes) -> None:
     reg.fecha_autorizacion = reg.fecha_autorizacion or info.fecha_autorizacion
 
 
+def completar_con_pdf(reg: almacen.Registro, contenido: bytes) -> None:
+    try:
+        info = xmlinfo.leer_ride(contenido)
+    except Exception:
+        return
+    reg.razon_contraparte = reg.razon_contraparte or info.razon_receptor
+    reg.ruc_contraparte = reg.ruc_contraparte or info.id_receptor
+    reg.total = reg.total or info.total
+
+
 class Registros:
     """Registros por mes abiertos durante una ejecución."""
 
@@ -349,6 +359,47 @@ def bajar_link(link_id: str, ident: str) -> Tarea:
         raise Falla(f"No se pudo bajar el archivo: {(r or {}).get('e', 'sin respuesta')}")
     v = r["v"]
     return int(v.get("status", 0)), v.get("tipo", ""), base64.b64decode(v.get("b64", ""))
+
+
+def contraparte_de_archivo(seccion: str, ruta: Path) -> str:
+    """Nombre del proveedor (recibidos) o cliente/retenido (emitidos) leído del archivo."""
+    try:
+        cont = ruta.read_bytes()
+        if ruta.suffix.lower() == ".pdf":
+            return xmlinfo.leer_ride(cont).razon_receptor if seccion == "emitidos" else ""
+        info = xmlinfo.leer(cont)
+        return info.razon_receptor if seccion == "emitidos" else info.razon_emisor
+    except Exception:
+        return ""
+
+
+def existente(op: Opciones, regs: "Registros", seccion: str, clave: Clave, ext: str,
+              contraparte: str = "") -> Path | None:
+    """Archivo ya guardado de ese comprobante (por el registro o con el nombre antiguo).
+
+    Si está con el nombre antiguo (la clave), se renombra al formato legible."""
+    rmes = regs.de(clave.fecha.year, clave.fecha.month)
+    previo = rmes.datos.get(clave.texto)
+    if previo:
+        for a in previo.archivos:
+            r = op.carpeta / a
+            if r.suffix.lower() == ext and r.is_file() and r.stem != clave.texto:
+                return r
+    viejo = almacen.ruta_comprobante(op.carpeta, seccion, clave, ext)
+    if viejo.is_file():
+        quien = contraparte or contraparte_de_archivo(seccion, viejo)
+        nuevo = almacen.ruta_legible(op.carpeta, seccion, clave, quien, ext)
+        if nuevo.exists():
+            return nuevo
+        viejo.rename(nuevo)
+        if previo:
+            previo.archivos = [x for x in previo.archivos if not x.endswith(viejo.name)]
+        return nuevo
+    if contraparte:
+        nuevo = almacen.ruta_legible(op.carpeta, seccion, clave, contraparte, ext)
+        if nuevo.is_file():
+            return nuevo
+    return None
 
 
 def _rel(op: Opciones, ruta: Path) -> str:
@@ -471,19 +522,18 @@ def procesar_recibidos(op: Opciones, regs: Registros, res: Resumen, cols: list[s
         clave, reg = fila_a_registro("recibidos", pos, f.get("celdas", []))
         if not clave:
             continue
-        ruta_xml = almacen.ruta_comprobante(op.carpeta, "recibidos", clave, ".xml")
-        if ruta_xml.is_file():
+        ruta_xml = existente(op, regs, "recibidos", clave, ".xml", reg.razon_contraparte)
+        if ruta_xml:
             res.existentes += 1
-            reg.archivos.append(_rel(op, ruta_xml))
             reg.origen, reg.estado = "XML del portal", "Ya existía"
             completar_con_xml(reg, ruta_xml.read_bytes())
         elif f.get("xml"):
             status, tipo, cont = yield from bajar_link(f["xml"], "x" + clave.texto[-12:])
             if xmlinfo.es_autorizacion(cont):
-                almacen.guardar_archivo(ruta_xml, cont)
-                reg.archivos.append(_rel(op, ruta_xml))
-                reg.origen, reg.estado = "XML del portal", "Descargado"
                 completar_con_xml(reg, cont)
+                ruta_xml = almacen.ruta_legible(op.carpeta, "recibidos", clave, reg.razon_contraparte, ".xml")
+                almacen.guardar_archivo(ruta_xml, cont)
+                reg.origen, reg.estado = "XML del portal", "Descargado"
                 res.nuevos += 1
                 res.xml_portal += 1
                 seguidos = 0
@@ -492,17 +542,19 @@ def procesar_recibidos(op: Opciones, regs: Registros, res: Resumen, cols: list[s
                 res.errores += 1
                 seguidos += 1
             yield from pausa(op)
-        if ruta_xml.is_file():
+        if ruta_xml and ruta_xml.is_file():
+            reg.archivos.append(_rel(op, ruta_xml))
             guardados += 1
         if op.con_pdf and f.get("pdf"):
-            ruta_pdf = ruta_xml.with_suffix(".pdf")
-            if not ruta_pdf.is_file():
+            ruta_pdf = existente(op, regs, "recibidos", clave, ".pdf", reg.razon_contraparte)
+            if not ruta_pdf:
                 _, _, cont = yield from bajar_link(f["pdf"], "p" + clave.texto[-12:])
                 if cont.startswith(b"%PDF"):
+                    ruta_pdf = almacen.ruta_legible(op.carpeta, "recibidos", clave, reg.razon_contraparte, ".pdf")
                     almacen.guardar_archivo(ruta_pdf, cont)
                     res.pdf += 1
                 yield from pausa(op)
-            if ruta_pdf.is_file():
+            if ruta_pdf and ruta_pdf.is_file():
                 reg.archivos.append(_rel(op, ruta_pdf))
         regs.de(clave.fecha.year, clave.fecha.month).poner(reg)
         if seguidos >= 3:
@@ -627,29 +679,30 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
         clave, reg = fila_a_registro("emitidos", pos, f.get("celdas", []))
         if not clave:
             continue
-        ruta_xml = almacen.ruta_comprobante(op.carpeta, "emitidos", clave, ".xml")
-        ruta_pdf = ruta_xml.with_suffix(".pdf")
+        ruta_xml = existente(op, regs, "emitidos", clave, ".xml")
+        ruta_pdf = existente(op, regs, "emitidos", clave, ".pdf")
         intentar_xml = not srv.caido and not (srv.sin_xml_hasta and clave.fecha <= srv.sin_xml_hasta)
-        if ruta_xml.is_file():
+        if ruta_xml:
             res.existentes += 1
-            reg.archivos.append(_rel(op, ruta_xml))
             reg.origen, reg.estado = "XML servicio web SRI", "Ya existía"
             completar_con_xml(reg, ruta_xml.read_bytes())
         else:
             xml = (yield from pedir_xml_servicio(srv, clave)) if intentar_xml else None
             if xml:
-                almacen.guardar_archivo(ruta_xml, xml)
-                reg.archivos.append(_rel(op, ruta_xml))
-                reg.origen, reg.estado = "XML servicio web SRI", "Descargado"
                 completar_con_xml(reg, xml)
+                ruta_xml = almacen.ruta_legible(op.carpeta, "emitidos", clave, reg.razon_contraparte, ".xml")
+                almacen.guardar_archivo(ruta_xml, xml)
+                reg.origen, reg.estado = "XML servicio web SRI", "Descargado"
                 res.nuevos += 1
                 res.xml_servicio += 1
-            elif ruta_pdf.is_file():
+            elif ruta_pdf:
                 res.existentes += 1
                 reg.origen, reg.estado = "PDF RIDE", "Ya existía"
             elif f.get("pdf"):
                 status, tipo, cont = yield from bajar_link(f["pdf"], "p" + clave.texto[-12:])
                 if cont.startswith(b"%PDF"):
+                    completar_con_pdf(reg, cont)
+                    ruta_pdf = almacen.ruta_legible(op.carpeta, "emitidos", clave, reg.razon_contraparte, ".pdf")
                     almacen.guardar_archivo(ruta_pdf, cont)
                     reg.origen, reg.estado = "PDF RIDE", "Descargado (sin XML)"
                     res.nuevos += 1
@@ -658,15 +711,21 @@ def procesar_emitidos(op: Opciones, regs: Registros, res: Resumen, srv: EstadoSe
                     reg.estado = f"Error: el portal no entregó el PDF (HTTP {status})"
                     res.errores += 1
             yield from pausa(op)
-        if op.con_pdf and not ruta_pdf.is_file() and f.get("pdf"):
+        if op.con_pdf and not ruta_pdf and f.get("pdf"):
             _, _, cont = yield from bajar_link(f["pdf"], "p" + clave.texto[-12:])
             if cont.startswith(b"%PDF"):
+                completar_con_pdf(reg, cont)
+                ruta_pdf = almacen.ruta_legible(op.carpeta, "emitidos", clave, reg.razon_contraparte, ".pdf")
                 almacen.guardar_archivo(ruta_pdf, cont)
                 res.pdf += 1
             yield from pausa(op)
-        if ruta_pdf.is_file():
+        if ruta_pdf and ruta_pdf.is_file():
+            if not reg.razon_contraparte:
+                completar_con_pdf(reg, ruta_pdf.read_bytes())
             reg.archivos.append(_rel(op, ruta_pdf))
-        if ruta_xml.is_file() or ruta_pdf.is_file():
+        if ruta_xml and ruta_xml.is_file():
+            reg.archivos.append(_rel(op, ruta_xml))
+        if (ruta_xml and ruta_xml.is_file()) or (ruta_pdf and ruta_pdf.is_file()):
             guardados += 1
         regs.de(clave.fecha.year, clave.fecha.month).poner(reg)
     return guardados

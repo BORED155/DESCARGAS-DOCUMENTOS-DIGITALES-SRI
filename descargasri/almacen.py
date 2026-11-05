@@ -20,11 +20,15 @@ from .clave import Clave
 SECCIONES = ("recibidos", "emitidos")
 
 
-def nombre_seguro(texto: str, largo: int = 80) -> str:
+def nombre_seguro(texto: str, largo: int = 80, puntos_al_final: bool = False) -> str:
+    """Texto válido como nombre de archivo en Linux y Windows.
+
+    Windows no admite nombres que terminen en punto; dentro de un nombre más
+    largo (puntos_al_final=True) el punto de «S.A.» se conserva."""
     t = unicodedata.normalize("NFC", texto or "").strip()
     t = re.sub(r'[\\/:*?"<>|\x00-\x1f]', " ", t)
-    t = re.sub(r"\s+", " ", t).strip(" .")
-    return t[:largo] or "SIN NOMBRE"
+    t = re.sub(r"\s+", " ", t).strip(" " if puntos_al_final else " .")
+    return t[:largo].strip() or "SIN NOMBRE"
 
 
 def carpeta_empresa(base: Path, ruc: str, razon: str) -> Path:
@@ -35,9 +39,31 @@ def carpeta_mes(base_empresa: Path, anio: int, mes: int) -> Path:
     return Path(base_empresa) / f"{anio:04d}-{mes:02d}"
 
 
-def ruta_comprobante(base_empresa: Path, seccion: str, clave: Clave, extension: str) -> Path:
+TIPO_EN_NOMBRE = {
+    "01": "Factura", "03": "Liquidación de compra", "04": "Nota de crédito",
+    "05": "Nota de débito", "06": "Guía de remisión", "07": "Retención",
+}
+
+
+def carpeta_comprobante(base_empresa: Path, seccion: str, clave: Clave) -> Path:
     f = clave.fecha
-    return carpeta_mes(base_empresa, f.year, f.month) / seccion / clave.carpeta_tipo / f"{clave.texto}{extension}"
+    return carpeta_mes(base_empresa, f.year, f.month) / seccion / clave.carpeta_tipo
+
+
+def ruta_comprobante(base_empresa: Path, seccion: str, clave: Clave, extension: str) -> Path:
+    """Nombre antiguo (versiones anteriores): la clave de acceso."""
+    return carpeta_comprobante(base_empresa, seccion, clave) / f"{clave.texto}{extension}"
+
+
+def nombre_archivo(clave: Clave, contraparte: str, extension: str) -> str:
+    """«AAAA-MM-DD PROVEEDOR Tipo 001-001-000000123.xml» (en emitidos, el cliente o retenido)."""
+    tipo = TIPO_EN_NOMBRE.get(clave.tipo, clave.nombre_tipo)
+    quien = nombre_seguro(contraparte or "SIN NOMBRE", 70, puntos_al_final=True)
+    return f"{clave.fecha:%Y-%m-%d} {quien} {tipo} {clave.serie}{extension}"
+
+
+def ruta_legible(base_empresa: Path, seccion: str, clave: Clave, contraparte: str, extension: str) -> Path:
+    return carpeta_comprobante(base_empresa, seccion, clave) / nombre_archivo(clave, contraparte, extension)
 
 
 @dataclass
@@ -84,8 +110,10 @@ class RegistroMes:
     def poner(self, r: Registro) -> None:
         previo = self.datos.get(r.clave)
         if previo:
-            # conservar archivos ya bajados y la marca de anulado
-            r.archivos = sorted(set(previo.archivos) | set(r.archivos))
+            # conservar archivos ya bajados (que sigan existiendo) y la marca de anulado
+            base = self.carpeta.parent
+            viejos = [x for x in previo.archivos if (base / x).is_file() or not base.is_dir()]
+            r.archivos = sorted(set(viejos) | set(r.archivos))
             r.anulado = r.anulado or previo.anulado
         r.anulado = r.anulado or r.clave in self.anulados
         self.datos[r.clave] = r
