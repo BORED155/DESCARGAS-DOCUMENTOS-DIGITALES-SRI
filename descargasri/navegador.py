@@ -81,6 +81,23 @@ def _puerto_libre(p: int) -> bool:
             return False
 
 
+def preparar_perfil(perfil: Path) -> None:
+    """Desactiva el gestor de contraseñas del perfil de la app: la clave no se guarda en Brave."""
+    pref = Path(perfil) / "Default" / "Preferences"
+    datos: dict = {}
+    if pref.is_file():
+        try:
+            datos = json.loads(pref.read_text(encoding="utf-8"))
+        except ValueError:
+            datos = {}
+    datos["credentials_enable_service"] = False
+    datos.setdefault("profile", {})["password_manager_enabled"] = False
+    datos["profile"]["password_manager_leak_detection"] = False
+    datos.setdefault("autofill", {})["profile_enabled"] = False
+    pref.parent.mkdir(parents=True, exist_ok=True)
+    pref.write_text(json.dumps(datos), encoding="utf-8")
+
+
 class Navegador:
     """Conexión DevTools a una pestaña del navegador de la app."""
 
@@ -113,9 +130,13 @@ class Navegador:
         if not _puerto_libre(self.puerto):
             raise NavegadorError(f"El puerto {self.puerto} está ocupado por otro programa.")
         self.perfil.mkdir(parents=True, exist_ok=True)
+        preparar_perfil(self.perfil)
         args = [exe, f"--remote-debugging-port={self.puerto}", "--remote-debugging-address=127.0.0.1",
                 f"--user-data-dir={self.perfil}", "--no-first-run", "--no-default-browser-check",
-                "--new-window", url]
+                # que la página siga trabajando aunque la ventana esté minimizada
+                "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows",
+                "--window-size=1100,800", "--new-window", url]
         extra = {}
         if sys.platform.startswith("win"):
             extra["creationflags"] = 0x00000008  # DETACHED_PROCESS
@@ -221,6 +242,49 @@ class Navegador:
                 pass
             time.sleep(0.5)
         return False
+
+    # --- ventana -----------------------------------------------------------
+
+    def _llamar_navegador(self, metodo: str, params: dict) -> dict:
+        """Orden al navegador (no a la pestaña): ventanas."""
+        import websocket
+
+        url = _json_http(f"http://127.0.0.1:{self.puerto}/json/version")["webSocketDebuggerUrl"]
+        ws = websocket.create_connection(url, timeout=10, suppress_origin=True)
+        try:
+            ws.send(json.dumps({"id": 1, "method": metodo, "params": params}))
+            while True:
+                m = json.loads(ws.recv())
+                if m.get("id") == 1:
+                    if "error" in m:
+                        raise NavegadorError(m["error"].get("message", "error"))
+                    return m.get("result", {})
+        finally:
+            ws.close()
+
+    def _ventana(self, estado: str) -> None:
+        try:
+            p = self._asegurar_pestana()
+            w = self._llamar_navegador("Browser.getWindowForTarget", {"targetId": p["id"]})["windowId"]
+            if estado == "normal":
+                self._llamar_navegador("Browser.setWindowBounds", {"windowId": w, "bounds": {"windowState": "normal"}})
+            else:
+                self._llamar_navegador("Browser.setWindowBounds", {"windowId": w, "bounds": {"windowState": estado}})
+        except Exception:
+            pass
+
+    def minimizar(self) -> None:
+        self._ventana("minimized")
+
+    def mostrar(self) -> None:
+        self._ventana("normal")
+        self.traer_al_frente()
+
+    def url(self) -> str:
+        try:
+            return self._asegurar_pestana().get("url", "")
+        except Exception:
+            return ""
 
     def borrar_cookies(self) -> None:
         self._llamar("Network.clearBrowserCookies", {})

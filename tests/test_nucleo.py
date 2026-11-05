@@ -352,3 +352,80 @@ def test_captcha_rechazado_reintenta_y_pide_al_usuario(escenario):
     assert capt == [True, False]
     assert sum("reintento" in a for a in avisos) == 2
     assert any("pulsa «Consultar»" in a for a in avisos)
+
+
+# --- ingreso al SRI -------------------------------------------------------------
+
+class LoginFalso:
+    def __init__(self, sesion_ruc: str | None, clave_ok: str = "buena"):
+        self.sesion_ruc = sesion_ruc
+        self.clave_ok = clave_ok
+        self.en_login = sesion_ruc is None
+        self.error = ""
+        self.borrados = 0
+        self.ingresos = []
+
+    def js(self, codigo: str):
+        t = codigo[len(portal.LIB):] if codigo.startswith(portal.LIB) else codigo
+        if "error: [...new Set" in t:
+            return {"login": self.en_login, "url": "x", "error": self.error}
+        if "kc-form-login'), url" in t:
+            return {"login": self.en_login, "url": "x"}
+        if "poner('usuario'" in t:
+            usuario = re.search(r"poner\('usuario', \"(\d+)\"\)", t).group(1)
+            clave = re.search(r"poner\('password', \"([^\"]*)\"\)", t).group(1)
+            self.ingresos.append(usuario)
+            if clave == self.clave_ok:
+                self.sesion_ruc, self.en_login = (usuario if len(usuario) == 13 else usuario + "001"), False
+            else:
+                self.error = "Usuario o clave incorrectos"
+            return {"ok": True}
+        if "D.empresa()" in t:
+            return {"url": "x", "emp": {"ruc": self.sesion_ruc, "razon": "EMPRESA " + self.sesion_ruc[-4:]} if self.sesion_ruc else None,
+                    "login": self.en_login}
+        if "btnBuscar')" in t:
+            return not self.en_login
+        if "kc-form-login')" in t:
+            return self.en_login
+        raise AssertionError("JS no esperado: " + t[:120])
+
+
+def correr_login(falso: LoginFalso, cred):
+    gen = tareas.iniciar_sesion(cred)
+    valor = None
+    while True:
+        try:
+            orden = gen.send(valor)
+        except StopIteration as fin:
+            return fin.value
+        valor = None
+        if isinstance(orden, tareas.Js):
+            valor = falso.js(orden.codigo)
+        elif isinstance(orden, tareas.BorrarSesion):
+            falso.borrados += 1
+            falso.sesion_ruc, falso.en_login = None, True
+
+
+def test_login_reutiliza_sesion_del_mismo_ruc():
+    f = LoginFalso(RUC_EMPRESA)
+    emp = correr_login(f, tareas.Credenciales(RUC_EMPRESA, ""))
+    assert emp["ruc"] == RUC_EMPRESA and f.ingresos == [] and f.borrados == 0
+
+
+def test_login_cambia_de_empresa():
+    f = LoginFalso(RUC_PROVEEDOR)
+    emp = correr_login(f, tareas.Credenciales(RUC_EMPRESA, "buena"))
+    assert f.borrados == 1 and f.ingresos == [RUC_EMPRESA] and emp["ruc"] == RUC_EMPRESA
+
+
+def test_login_con_cedula_y_clave_incorrecta():
+    f = LoginFalso(None)
+    with pytest.raises(tareas.Falla, match="Usuario o clave incorrectos"):
+        correr_login(f, tareas.Credenciales("1700000003", "mala"))
+    f2 = LoginFalso(None)
+    emp = correr_login(f2, tareas.Credenciales("1700000003", "buena"))
+    assert emp["ruc"] == "1700000003001"
+
+
+def test_credenciales_no_muestran_la_clave():
+    assert "secreta" not in repr(tareas.Credenciales(RUC_EMPRESA, "secreta"))

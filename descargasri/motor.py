@@ -9,8 +9,8 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from . import portal
 from .navegador import Navegador, NavegadorError
-from .tareas import (Aviso, Cancelado, Captcha, Esperar, Falla, Js, JsAsync, Navegar, Progreso,
-                     Python, Tarea)
+from .tareas import (Aviso, BorrarSesion, Cancelado, Captcha, Esperar, Falla, Js, JsAsync, Navegar,
+                     Progreso, Python, Tarea)
 
 
 class _Hilo(QThread):
@@ -34,6 +34,7 @@ class Motor(QObject):
         self.nav = navegador
         self._hilo: _Hilo | None = None
         self._cancelar = threading.Event()
+        self.ocultar_navegador = True
 
     @property
     def ocupado(self) -> bool:
@@ -92,7 +93,12 @@ class Motor(QObject):
         if isinstance(orden, Captcha):
             self.captcha.emit(orden.visible)
             if orden.visible:
-                self.nav.traer_al_frente()
+                self.nav.mostrar()
+            elif self.ocultar_navegador:
+                self.nav.minimizar()
+            return None
+        if isinstance(orden, BorrarSesion):
+            self.nav.borrar_cookies()
             return None
         raise TypeError(f"Orden desconocida: {orden!r}")
 

@@ -11,12 +11,12 @@ from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QProgressBar, QPushButton, QScrollArea, QSpinBox, QTextEdit,
-                               QVBoxLayout, QWidget)
+                               QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__, portal
 from ..motor import Motor
-from ..navegador import Navegador, NavegadorError, buscar_ejecutable, nombre_navegador
-from ..tareas import Opciones, descargar
+from ..navegador import Navegador, NavegadorError, buscar_ejecutable
+from ..tareas import Credenciales, Opciones, descargar
 
 NOMBRE_APP = "Descargas Documentos Digitales SRI"
 MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre",
@@ -29,7 +29,6 @@ QPushButton#descargar:disabled { background:#a5c9a7; }
 QPushButton#detener { background:#c62828; color:white; font-weight:bold; padding:8px; border-radius:4px; }
 QPushButton#detener:disabled { background:#e3a5a5; }
 QPushButton#sesion { background:#222; color:white; padding:6px; border-radius:4px; }
-QPushButton#abrir { background:#1565c0; color:white; font-weight:bold; padding:8px; border-radius:4px; }
 QLabel#captcha { background:#fff3cd; color:#7a5200; border:1px solid #e0b84c; padding:8px; font-weight:bold; }
 QLabel#empresa { font-size:13px; font-weight:bold; }
 """
@@ -39,9 +38,9 @@ class Ventana(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{NOMBRE_APP} {__version__}")
-        self.resize(1450, 900)
         self.ajustes = QSettings("Leninsodu", "DescargasSRI")
         self.empresa: dict | None = None
+        self._abierto_por_app = False
 
         datos = Path(QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation))
         self.nav = Navegador(datos / "perfil-navegador")
@@ -64,11 +63,8 @@ class Ventana(QMainWindow):
         self._reloj.timeout.connect(self._detectar_empresa)
         self._reloj.start(3000)
         self._actualizar_botones()
-        exe = buscar_ejecutable()
-        self._log(f"Navegador: {exe}" if exe else "No encontré Brave ni Chrome: instala uno de los dos.",
-                  "info" if exe else "error")
-        if self.nav.disponible():
-            self.lbl_nav.setText("Navegador del SRI: abierto")
+        if not buscar_ejecutable():
+            self._log("No encontré Brave ni Google Chrome: la app necesita uno de los dos instalado.", "error")
 
     # --- panel ---------------------------------------------------------------
 
@@ -77,18 +73,34 @@ class Ventana(QMainWindow):
         p.setMinimumWidth(420)
         lay = QVBoxLayout(p)
 
-        ayuda = QLabel("1. Pulsa «Abrir el SRI en Brave» y entra con tu RUC y clave en esa ventana "
-                       "(la app no ve ni guarda tu clave).\n2. Elige periodo y qué bajar.\n3. Pulsa Descargar.")
-        ayuda.setWordWrap(True)
-        lay.addWidget(ayuda)
-
-        self.btn_abrir = QPushButton("Abrir el SRI en Brave")
-        self.btn_abrir.setObjectName("abrir")
-        self.btn_abrir.clicked.connect(self._abrir_navegador)
-        lay.addWidget(self.btn_abrir)
-        self.lbl_nav = QLabel("Navegador del SRI: cerrado")
-        self.lbl_nav.setStyleSheet("color:#555")
-        lay.addWidget(self.lbl_nav)
+        g = QGroupBox("Ingreso al SRI en línea")
+        gl = QGridLayout(g)
+        self.usuario = QLineEdit(str(self.ajustes.value("usuario", "")))
+        self.usuario.setPlaceholderText("RUC o cédula")
+        self.usuario.setMaxLength(13)
+        self.ci_adicional = QLineEdit(str(self.ajustes.value("ci_adicional", "")))
+        self.ci_adicional.setPlaceholderText("Solo si eres usuario adicional")
+        self.ci_adicional.setMaxLength(10)
+        self.clave = QLineEdit()
+        self.clave.setEchoMode(QLineEdit.Password)
+        self.clave.setPlaceholderText("Clave del SRI (no se guarda)")
+        self.clave.returnPressed.connect(self._descargar)
+        ver = QToolButton()
+        ver.setText("👁")
+        ver.setCheckable(True)
+        ver.setToolTip("Mostrar u ocultar la clave")
+        ver.toggled.connect(lambda v: self.clave.setEchoMode(QLineEdit.Normal if v else QLineEdit.Password))
+        self.chk_recordar = QCheckBox("Recordar RUC (la clave nunca se guarda)")
+        self.chk_recordar.setChecked(self.ajustes.value("recordar", "true") == "true")
+        gl.addWidget(QLabel("RUC / C.I."), 0, 0)
+        gl.addWidget(self.usuario, 0, 1, 1, 2)
+        gl.addWidget(QLabel("C.I. adicional"), 1, 0)
+        gl.addWidget(self.ci_adicional, 1, 1, 1, 2)
+        gl.addWidget(QLabel("Clave"), 2, 0)
+        gl.addWidget(self.clave, 2, 1)
+        gl.addWidget(ver, 2, 2)
+        gl.addWidget(self.chk_recordar, 3, 0, 1, 3)
+        lay.addWidget(g)
 
         self.lbl_empresa = QLabel("Empresa: sin sesión")
         self.lbl_empresa.setObjectName("empresa")
@@ -101,19 +113,14 @@ class Ventana(QMainWindow):
         self.anio = QSpinBox()
         self.anio.setRange(2012, hoy.year)
         self.anio.setValue(int(self.ajustes.value("anio", hoy.year)))
-        self.mes_desde = QComboBox()
-        self.mes_hasta = QComboBox()
-        self.mes_desde.addItems(MESES)
-        self.mes_hasta.addItems(MESES)
+        self.mes = QComboBox()
+        self.mes.addItems(MESES)
         previo = hoy.month - 2 if hoy.month > 1 else 0
-        self.mes_desde.setCurrentIndex(int(self.ajustes.value("mes_desde", previo)))
-        self.mes_hasta.setCurrentIndex(int(self.ajustes.value("mes_hasta", previo)))
-        gl.addWidget(QLabel("Año"), 0, 0)
-        gl.addWidget(self.anio, 0, 1)
-        gl.addWidget(QLabel("Desde"), 1, 0)
-        gl.addWidget(self.mes_desde, 1, 1)
-        gl.addWidget(QLabel("Hasta"), 2, 0)
-        gl.addWidget(self.mes_hasta, 2, 1)
+        self.mes.setCurrentIndex(int(self.ajustes.value("mes", previo)))
+        gl.addWidget(QLabel("Mes"), 0, 0)
+        gl.addWidget(self.mes, 0, 1)
+        gl.addWidget(QLabel("Año"), 0, 2)
+        gl.addWidget(self.anio, 0, 3)
         lay.addWidget(g)
 
         g = QGroupBox("Qué descargar")
@@ -182,10 +189,17 @@ class Ventana(QMainWindow):
         self.registro.setMinimumHeight(220)
         lay.addWidget(self.registro, 1)
 
-        self.btn_sesion = QPushButton("Cerrar sesión / cambiar de empresa")
+        fila = QHBoxLayout()
+        self.btn_ver = QPushButton("Ver navegador")
+        self.btn_ver.setToolTip("Muestra la ventana de Brave que usa la app")
+        self.btn_ver.clicked.connect(self._ver_navegador)
+        fila.addWidget(self.btn_ver)
+        lay.addLayout(fila)
+
+        self.btn_sesion = QPushButton("Cerrar sesión del SRI")
         self.btn_sesion.setObjectName("sesion")
         self.btn_sesion.clicked.connect(self._cerrar_sesion)
-        lay.addWidget(self.btn_sesion)
+        fila.addWidget(self.btn_sesion)
         return p
 
     # --- acciones ----------------------------------------------------------------
@@ -205,18 +219,28 @@ class Ventana(QMainWindow):
         ruta.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(ruta)))
 
-    def _abrir_navegador(self):
+    def _asegurar_navegador(self) -> bool:
+        if self.nav.disponible():
+            return True
         try:
-            nombre = self.nav.abrir(portal.INICIO)
+            self.nav.abrir(portal.INICIO)
         except NavegadorError as e:
             QMessageBox.warning(self, NOMBRE_APP, str(e))
-            return
-        self.lbl_nav.setText("Navegador del SRI: abierto")
-        self._log(f"Se abrió el SRI ({nombre}). Entra con tu RUC y clave en esa ventana.", "info")
-        self.nav.traer_al_frente()
+            return False
+        self._abierto_por_app = True
+        self.nav.minimizar()
+        self.raise_()
+        self.activateWindow()
+        return True
+
+    def _ver_navegador(self):
+        if self._asegurar_navegador():
+            self.nav.mostrar()
 
     def _cerrar_sesion(self):
         if self.motor.ocupado or not self.nav.disponible():
+            return
+        if QMessageBox.question(self, NOMBRE_APP, "¿Cerrar la sesión del SRI?") != QMessageBox.Yes:
             return
         try:
             self.nav.borrar_cookies()
@@ -225,20 +249,18 @@ class Ventana(QMainWindow):
             self._log(str(e), "error")
         self.empresa = None
         self.lbl_empresa.setText("Empresa: sin sesión")
-        self._log("Sesión cerrada. Entra con la otra empresa en la ventana del SRI.", "info")
+        self._log("Sesión del SRI cerrada.", "info")
         self._actualizar_botones()
 
     def _detectar_empresa(self):
         if self.motor.ocupado:
             return
         if not self.nav.disponible():
-            self.lbl_nav.setText("Navegador del SRI: cerrado")
             if self.empresa:
                 self.empresa = None
                 self.lbl_empresa.setText("Empresa: sin sesión")
                 self._actualizar_botones()
             return
-        self.lbl_nav.setText("Navegador del SRI: abierto")
         try:
             v = self.nav.evaluar(portal.empresa(), 3)
         except NavegadorError:
@@ -246,22 +268,24 @@ class Ventana(QMainWindow):
         emp = v.get("emp") if isinstance(v, dict) and not v.get("login") else None
         if emp and (not self.empresa or emp["ruc"] != self.empresa["ruc"]):
             self.empresa = emp
-            self.lbl_empresa.setText(f"Empresa: {emp['ruc']}\n{emp.get('razon', '')}")
-            self._log(f"Sesión detectada: {emp['ruc']} {emp.get('razon', '')}", "ok")
+            self.lbl_empresa.setText(f"Sesión abierta: {emp['ruc']}\n{emp.get('razon', '')}")
             self._actualizar_botones()
 
     def _actualizar_botones(self):
         ocupado = self.motor.ocupado
-        self.btn_descargar.setEnabled(not ocupado and self.empresa is not None)
+        self.btn_descargar.setEnabled(not ocupado)
         self.btn_detener.setEnabled(ocupado)
-        self.btn_sesion.setEnabled(not ocupado)
-        self.btn_abrir.setEnabled(not ocupado)
+        self.btn_sesion.setEnabled(not ocupado and self.empresa is not None)
+        for w in (self.usuario, self.ci_adicional, self.clave, self.mes, self.anio):
+            w.setEnabled(not ocupado)
 
     def _guardar_ajustes(self):
         a = self.ajustes
         a.setValue("anio", self.anio.value())
-        a.setValue("mes_desde", self.mes_desde.currentIndex())
-        a.setValue("mes_hasta", self.mes_hasta.currentIndex())
+        a.setValue("mes", self.mes.currentIndex())
+        a.setValue("recordar", "true" if self.chk_recordar.isChecked() else "false")
+        a.setValue("usuario", self.usuario.text().strip() if self.chk_recordar.isChecked() else "")
+        a.setValue("ci_adicional", self.ci_adicional.text().strip() if self.chk_recordar.isChecked() else "")
         for i, c in enumerate((self.chk_rec, self.chk_emi, self.chk_anu)):
             a.setValue(f"sec{i}", "true" if c.isChecked() else "false")
         for cod, c in self.chk_tipos.items():
@@ -270,11 +294,17 @@ class Ventana(QMainWindow):
         a.setValue("carpeta", self.carpeta.text())
 
     def _descargar(self):
-        if not self.empresa or self.motor.ocupado:
+        if self.motor.ocupado:
             return
-        d, h = self.mes_desde.currentIndex() + 1, self.mes_hasta.currentIndex() + 1
-        if h < d:
-            QMessageBox.warning(self, NOMBRE_APP, "El mes «Hasta» es anterior al mes «Desde».")
+        usuario = self.usuario.text().strip()
+        if not (usuario.isdigit() and len(usuario) in (10, 13)):
+            QMessageBox.warning(self, NOMBRE_APP, "Escribe el RUC (13 dígitos) o la cédula (10 dígitos).")
+            self.usuario.setFocus()
+            return
+        sesion_activa = self.empresa is not None and Credenciales(usuario, "").corresponde(self.empresa["ruc"])
+        if not self.clave.text() and not sesion_activa:
+            QMessageBox.warning(self, NOMBRE_APP, "Escribe la clave del SRI.")
+            self.clave.setFocus()
             return
         tipos = [c for c, chk in self.chk_tipos.items() if chk.isChecked()]
         if not tipos and (self.chk_rec.isChecked() or self.chk_emi.isChecked()):
@@ -283,13 +313,17 @@ class Ventana(QMainWindow):
         if not (self.chk_rec.isChecked() or self.chk_emi.isChecked() or self.chk_anu.isChecked()):
             QMessageBox.warning(self, NOMBRE_APP, "Elige qué descargar.")
             return
+        if not self._asegurar_navegador():
+            return
         self._guardar_ajustes()
+        cred = Credenciales(usuario, self.clave.text(), self.ci_adicional.text().strip())
+        self.clave.clear()  # la clave solo vive mientras se entra al SRI
         op = Opciones(
             base=Path(self.carpeta.text()),
-            ruc=self.empresa["ruc"],
-            razon=self.empresa.get("razon", ""),
+            ruc=usuario,
+            razon="",
             anio=self.anio.value(),
-            meses=list(range(d, h + 1)),
+            meses=[self.mes.currentIndex() + 1],
             recibidos=self.chk_rec.isChecked(),
             emitidos=self.chk_emi.isChecked(),
             anulados=self.chk_anu.isChecked(),
@@ -299,7 +333,7 @@ class Ventana(QMainWindow):
         )
         self.registro.clear()
         self.barra.setValue(0)
-        self.motor.iniciar(descargar(op))
+        self.motor.iniciar(descargar(op, cred))
         self._actualizar_botones()
 
     # --- señales del motor ------------------------------------------------------
@@ -339,6 +373,8 @@ class Ventana(QMainWindow):
             self.activateWindow()
 
     def _terminado(self, ok: bool, msg: str):
+        self.empresa = None  # se vuelve a leer de la cabecera
+        self._detectar_empresa()
         self._log(msg, "ok" if ok else "error")
         self.lbl_paso.setText(msg)
         self._actualizar_botones()
@@ -354,5 +390,10 @@ class Ventana(QMainWindow):
             self.motor.detener()
             self.motor.esperar_fin(8000)
         self._guardar_ajustes()
+        if self._abierto_por_app:
+            try:  # cerrar el Brave que abrió la app (termina la sesión del SRI)
+                self.nav._llamar_navegador("Browser.close", {})
+            except Exception:
+                pass
         self.nav.cerrar()
         super().closeEvent(e)

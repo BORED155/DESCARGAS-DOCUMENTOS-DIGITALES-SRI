@@ -170,6 +170,40 @@ def js_resultado(ident: str) -> str:
 
 # --- Acciones concretas -------------------------------------------------
 
+def en_login() -> str:
+    return js("return {login: !!document.getElementById('kc-form-login'), url: location.href};")
+
+
+def ingresar(usuario: str, ci_adicional: str, clave: str) -> str:
+    """Llena el formulario de ingreso del SRI y pulsa «Ingresar» (la página arma el resto)."""
+    return js(f"""
+      const f = document.getElementById('kc-form-login');
+      if (!f) return {{ok: false, e: 'No estoy en la página de ingreso del SRI'}};
+      const poner = (id, v) => {{
+        const e = document.getElementById(id); if (!e) return;
+        e.focus(); e.value = v;
+        e.dispatchEvent(new Event('input', {{bubbles: true}}));
+        e.dispatchEvent(new Event('change', {{bubbles: true}}));
+        e.dispatchEvent(new Event('blur', {{bubbles: true}}));
+      }};
+      poner('usuario', {json.dumps(usuario)});
+      poner('ciAdicional', {json.dumps(ci_adicional)});
+      poner('password', {json.dumps(clave)});
+      const b = document.getElementById('kc-login');
+      if (b) b.click(); else f.requestSubmit ? f.requestSubmit() : f.submit();
+      return {{ok: true}};
+    """)
+
+
+def error_login() -> str:
+    """Mensaje visible en la página de ingreso (clave incorrecta, etc.)."""
+    return js("""
+      const sel = '#input-error, .kc-feedback-text, .alert, .alert-error, [class*="error"], [id*="error"], .ui-messages';
+      const t = [...document.querySelectorAll(sel)].filter(D.visible).map(e => e.innerText.trim()).filter(Boolean);
+      return {login: !!document.getElementById('kc-form-login'), url: location.href, error: [...new Set(t)].join(' / ').slice(0, 300)};
+    """)
+
+
 def empresa() -> str:
     return js("return {url: location.href, emp: D.empresa(), login: /login|auth|openid/i.test(location.href)};")
 

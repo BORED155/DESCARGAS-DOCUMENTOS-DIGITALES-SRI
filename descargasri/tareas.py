@@ -68,6 +68,26 @@ class Captcha:
     visible: bool
 
 
+@dataclass
+class BorrarSesion:
+    """Cierra la sesión del SRI en el navegador (borra sus cookies)."""
+
+
+@dataclass(repr=False)
+class Credenciales:
+    """Datos de ingreso que el usuario escribe en la app. No se guardan en disco."""
+    usuario: str
+    clave: str
+    ci_adicional: str = ""
+
+    def __repr__(self) -> str:  # nunca mostrar la clave en registros
+        return f"Credenciales(usuario={self.usuario!r}, ci_adicional={self.ci_adicional!r}, clave=***)"
+
+    def corresponde(self, ruc: str) -> bool:
+        u = self.usuario.strip()
+        return ruc == u or (len(u) == 10 and ruc == u + "001")
+
+
 class Falla(Exception):
     """Error que detiene la tarea con un mensaje para el usuario."""
 
@@ -139,6 +159,51 @@ def comprobar_sesion(intentos: int = 15) -> Tarea:
             return v["emp"]
         yield Esperar(1000)
     raise Falla("La sesión del SRI está cerrada. Vuelve a entrar con tu RUC y clave y pulsa Descargar otra vez.")
+
+
+def iniciar_sesion(cred: Credenciales) -> Tarea:
+    """Entra al SRI con los datos del usuario (o reutiliza la sesión si ya es de ese RUC)."""
+    yield Aviso("Conectando con el SRI…")
+    yield Navegar(portal.URL_RECIBIDOS)
+    estado = None
+    for _ in range(40):
+        estado = (yield Js(portal.en_login())) or {}
+        if estado.get("login"):
+            break
+        hay = yield Js(portal.hay("document.getElementById('frmPrincipal:btnBuscar')"))
+        if hay:
+            break
+        yield Esperar(750)
+    if not estado.get("login"):
+        emp = yield from comprobar_sesion()
+        if cred.corresponde(emp["ruc"]):
+            yield Aviso(f"Sesión ya abierta: {emp['ruc']} {emp.get('razon', '')}", "ok")
+            return emp
+        yield Aviso(f"Había una sesión de {emp['ruc']} {emp.get('razon', '')}; se cierra para entrar con {cred.usuario}.")
+        yield BorrarSesion()
+        yield Navegar(portal.URL_RECIBIDOS)
+        yield from esperar_condicion(portal.hay("document.getElementById('kc-form-login')"), bool, 45,
+                                     "abrir la página de ingreso")
+    if not cred.clave:
+        raise Falla("Escribe la clave del SRI para entrar.")
+    r = yield Js(portal.ingresar(cred.usuario.strip(), cred.ci_adicional.strip(), cred.clave))
+    if not r or not r.get("ok"):
+        raise Falla((r or {}).get("e", "No se pudo llenar el ingreso del SRI."))
+    yield Esperar(2000)
+    for _ in range(60):
+        e = (yield Js(portal.error_login())) or {}
+        if not e.get("login"):
+            break
+        if e.get("error"):
+            raise Falla(f"El SRI no aceptó el ingreso: {e['error']}")
+        yield Esperar(750)
+    else:
+        raise Falla("El SRI no terminó el ingreso a tiempo.")
+    emp = yield from comprobar_sesion(30)
+    if not cred.corresponde(emp["ruc"]):
+        yield Aviso(f"Entraste como {emp['ruc']} {emp.get('razon', '')}.", "alerta")
+    yield Aviso(f"Ingreso correcto: {emp['ruc']} {emp.get('razon', '')}", "ok")
+    return emp
 
 
 def esperar_consulta(sufijo: str, entera: bool = True, timeout_s: float = 90) -> Tarea:
@@ -611,7 +676,7 @@ def total_pasos(op: Opciones) -> int:
     return max(n, 1)
 
 
-def descargar(op: Opciones) -> Tarea:
+def descargar(op: Opciones, cred: Credenciales | None = None) -> Tarea:
     res = Resumen()
     regs = Registros(op)
     srv = EstadoServicio()
@@ -622,9 +687,14 @@ def descargar(op: Opciones) -> Tarea:
         yield Progreso(hecho[0], total, texto)
         hecho[0] += 1
 
-    emp = yield from comprobar_sesion()
-    if emp.get("ruc") != op.ruc:
-        raise Falla(f"La sesión abierta es de {emp.get('ruc')} {emp.get('razon', '')}, no de {op.ruc}.")
+    if cred is not None:
+        emp = yield from iniciar_sesion(cred)
+        op.ruc, op.razon = emp["ruc"], emp.get("razon", "")
+        cred.clave = ""  # ya no hace falta
+    else:
+        emp = yield from comprobar_sesion()
+        if emp.get("ruc") != op.ruc:
+            raise Falla(f"La sesión abierta es de {emp.get('ruc')} {emp.get('razon', '')}, no de {op.ruc}.")
     meses = meses_validos(op)
     if not meses:
         raise Falla("Los meses elegidos todavía no han empezado.")
